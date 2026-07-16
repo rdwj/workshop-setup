@@ -1,0 +1,13 @@
+apiVersion: security.istio.io/v1
+kind: RequestAuthentication
+metadata:
+  name: mcp-gateway-jwt
+  namespace: gateway-system
+spec:
+  selector:
+    matchLabels:
+      gateway.networking.k8s.io/gateway-name: mcp-gateway
+  jwtRules:
+    - issuer: "https://keycloak-keycloak.apps.cluster-n7pd5.n7pd5.sandbox5167.opentlc.com/realms/mcp-gateway"
+      jwksUri: "https://keycloak-keycloak.apps.cluster-n7pd5.n7pd5.sandbox5167.opentlc.com/realms/mcp-gateway/protocol/openid-connect/certs"
+      forwardOriginalToken: true

@@ -1,0 +1,222 @@
+# Model Catalog and GPU-as-a-Service Setup for RHOAI 3.4
+#
+# Enables Model Catalog features on a cluster that already has RHOAI 3.4
+# with MaaS installed.
+#
+# This playbook:
+#   1. Patches OdhDashboardConfig for vLLM deployment and observability features
+#   2. Deploys the Granite 3.3 8B Instruct model (conditional)
+#   3. Creates a default MaaS subscription for workshop users (conditional)
+#   4. Verifies the configuration
+#
+# Prerequisites:
+#   - RHOAI 3.4 installed
+#   - MaaS enabled (via maas-setup.yml)
+#   - GPU node available (if deploying model)
+#
+# Usage: cd ansible && ansible-playbook model-catalog-setup.yml -i inventory/34-rhoai.yml
+#
+- name: Model Catalog and GPU-as-a-Service Setup for RHOAI 3.4
+  hosts: all
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      host: "{{ k8s_host }}"
+      api_key: "{{ k8s_api_key }}"
+      validate_certs: "{{ validate_certs }}"
+  vars:
+    manifest_base_dir: "{{ playbook_dir }}/.."
+    deploy_model: true
+    create_subscription: true
+    model_manifest: "model/granite-llm.yaml"
+    model_namespace: "granite-model"
+    model_deployment_name: "granite-3-3-8b-instruct"
+    model_route_name: "granite-3-3-8b-instruct"
+    model_deploy_retries: 60
+    model_deploy_delay: 30
+
+  tasks:
+    # =========================================================================
+    # Phase 1: Enable Dashboard Features
+    # =========================================================================
+
+    - name: "Phase 1: Patch OdhDashboardConfig for Model Catalog features"
+      kubernetes.core.k8s:
+        api_version: opendatahub.io/v1alpha
+        kind: OdhDashboardConfig
+        name: odh-dashboard-config
+        namespace: redhat-ods-applications
+        definition:
+          spec:
+            dashboardConfig:
+              vLLMDeploymentOnMaaS: true
+              observabilityDashboard: true
+        merge_type: merge
+
+    - name: "Phase 1: Verify OdhDashboardConfig updated"
+      kubernetes.core.k8s_info:
+        api_version: opendatahub.io/v1alpha
+        kind: OdhDashboardConfig
+        name: odh-dashboard-config
+        namespace: redhat-ods-applications
+      register: dashboard_config_check
+
+    - name: "Phase 1: Display dashboard features enabled"
+      ansible.builtin.debug:
+        msg:
+          - "vLLMDeploymentOnMaaS: {{ dashboard_config_check.resources[0].spec.dashboardConfig.vLLMDeploymentOnMaaS | default(false) }}"
+          - "observabilityDashboard: {{ dashboard_config_check.resources[0].spec.dashboardConfig.observabilityDashboard | default(false) }}"
+
+    # =========================================================================
+    # Phase 2: Deploy GPU Model (Conditional)
+    # =========================================================================
+
+    - name: "Phase 2: Apply Granite LLM manifest"
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ doc }}"
+      loop: >-
+        {{
+          lookup('file', manifest_base_dir + '/' + model_manifest)
+          | from_yaml_all
+          | select('ne', none)
+          | list
+        }}
+      loop_control:
+        loop_var: doc
+        label: "{{ doc.kind }}/{{ doc.metadata.name }}"
+      when: deploy_model | bool
+
+    - name: "Phase 2: Wait for Granite deployment to be ready"
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: "{{ model_deployment_name }}"
+        namespace: "{{ model_namespace }}"
+      register: model_deploy_check
+      until:
+        - model_deploy_check.resources | length > 0
+        - model_deploy_check.resources[0].status.readyReplicas | default(0) | int >= 1
+      retries: "{{ model_deploy_retries | int }}"
+      delay: "{{ model_deploy_delay | int }}"
+      when: deploy_model | bool
+
+    - name: "Phase 2: Get Granite route hostname"
+      kubernetes.core.k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        name: "{{ model_route_name }}"
+        namespace: "{{ model_namespace }}"
+      register: granite_route
+      when: deploy_model | bool
+
+    - name: "Phase 2: Display Granite model endpoint"
+      ansible.builtin.debug:
+        msg: "Granite 3.3 8B endpoint: https://{{ granite_route.resources[0].spec.host }}/v1"
+      when:
+        - deploy_model | bool
+        - granite_route.resources | length > 0
+
+    - name: "Phase 2: Model deployment skipped"
+      ansible.builtin.debug:
+        msg: "Model deployment skipped (deploy_model=false)"
+      when: not (deploy_model | bool)
+
+    # =========================================================================
+    # Phase 3: Create MaaS Subscription (Conditional)
+    # =========================================================================
+
+    - name: "Phase 3: Check for published MaaS models"
+      kubernetes.core.k8s_info:
+        api_version: maas.opendatahub.io/v1alpha1
+        kind: MaaSModelRef
+      register: maas_models
+      when: create_subscription | bool
+
+    - name: "Phase 3: Create workshop default MaaS subscription"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: maas.opendatahub.io/v1alpha1
+          kind: MaaSSubscription
+          metadata:
+            name: workshop-default
+            namespace: models-as-a-service
+          spec:
+            owner: admin1
+            priority: 0
+            modelRefs: >-
+              {{
+                maas_models.resources
+                | map(attribute='metadata')
+                | map('dict2items')
+                | map('selectattr', 'key', 'in', ['name', 'namespace'])
+                | map('items2dict')
+                | list
+              }}
+      register: subscription_result
+      ignore_errors: true
+      when:
+        - create_subscription | bool
+        - maas_models.resources | default([]) | length > 0
+
+    - name: "Phase 3: No MaaS models published yet"
+      ansible.builtin.debug:
+        msg: >-
+          No models published via MaaS yet. Deploy a model and publish it
+          from the RHOAI dashboard (Advanced settings > Publish as MaaS),
+          then re-run with -e create_subscription=true.
+      when:
+        - create_subscription | bool
+        - maas_models.resources | default([]) | length == 0
+
+    - name: "Phase 3: MaaS subscription skipped"
+      ansible.builtin.debug:
+        msg: "MaaS subscription creation skipped (create_subscription=false)"
+      when: not (create_subscription | bool)
+
+    # =========================================================================
+    # Phase 4: Verify
+    # =========================================================================
+
+    - name: "Phase 4: Get final dashboard config"
+      kubernetes.core.k8s_info:
+        api_version: opendatahub.io/v1alpha
+        kind: OdhDashboardConfig
+        name: odh-dashboard-config
+        namespace: redhat-ods-applications
+      register: final_dashboard_config
+
+    - name: "Phase 4: Check model deployment status"
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: "{{ model_deployment_name }}"
+        namespace: "{{ model_namespace }}"
+      register: final_model_check
+      when: deploy_model | bool
+
+    - name: "Phase 4: Check MaaS subscription status"
+      kubernetes.core.k8s_info:
+        api_version: maas.opendatahub.io/v1alpha1
+        kind: MaaSSubscription
+        name: workshop-default
+        namespace: models-as-a-service
+      register: final_subscription_check
+      when: create_subscription | bool
+
+    - name: Model Catalog setup complete
+      ansible.builtin.debug:
+        msg:
+          - "=== Model Catalog and GPU-as-a-Service Configuration ==="
+          - ""
+          - "Dashboard Features:"
+          - "  vLLMDeploymentOnMaaS: {{ final_dashboard_config.resources[0].spec.dashboardConfig.vLLMDeploymentOnMaaS | default(false) }}"
+          - "  observabilityDashboard: {{ final_dashboard_config.resources[0].spec.dashboardConfig.observabilityDashboard | default(false) }}"
+          - ""
+          - "Model Deployment:"
+          - "  {{ 'Granite 3.3 8B Instruct: Running (' + (final_model_check.resources[0].status.readyReplicas | default(0) | string) + '/1 replicas ready)' if (deploy_model | bool) and (final_model_check.resources | length > 0) else 'Not deployed' }}"
+          - "  {{ 'Endpoint: https://' + granite_route.resources[0].spec.host + '/v1' if (deploy_model | bool) and (granite_route.resources | length > 0) else '' }}"
+          - ""
+          - "MaaS Subscription:"
+          - "  {{ 'workshop-default subscription created' if (create_subscription | bool) and (final_subscription_check.resources | default([]) | length > 0) else 'Not created or creation skipped' }}"

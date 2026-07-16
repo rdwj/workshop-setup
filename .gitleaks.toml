@@ -1,0 +1,6 @@
+[allowlist]
+description = "Known pre-existing secrets in git history"
+paths = [
+  '''auth/htpasswd-secret\.yaml''',
+  '''model/quantize-prometheus-8x7b\.yaml''',
+]

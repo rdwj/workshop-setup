@@ -1,0 +1,138 @@
+# GPT-OSS-120B Ephemeral A100 Deployment — Tear Down
+#
+# Removes model workloads and scales the A100 MachineSet to zero.
+# Preserves the namespace and PVCs so cached model weights (~120GB)
+# survive for faster next spin-up.
+#
+# Full cleanup (including PVCs): -e cleanup_all=true
+#
+# Usage: cd ansible && ansible-playbook gpt-oss-120b-down.yml -i inventory/mcp-rhoai.yml
+#
+- name: GPT-OSS-120B Ephemeral A100 Deployment — Tear Down
+  hosts: all
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      host: "{{ k8s_host }}"
+      api_key: "{{ k8s_api_key }}"
+      validate_certs: "{{ validate_certs }}"
+  vars:
+    a100_machineset_prefix: "a100-"
+    model_namespace: gpt-oss-120b-model
+    cleanup_all: false
+    machine_retries: 40
+    machine_delay: 30
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # Remove Model Workloads
+    # -------------------------------------------------------------------------
+
+    - name: Delete Deployment gpt-oss-120b
+      kubernetes.core.k8s:
+        state: absent
+        api_version: apps/v1
+        kind: Deployment
+        name: gpt-oss-120b
+        namespace: "{{ model_namespace }}"
+      ignore_errors: true
+
+    - name: Delete Service gpt-oss-120b
+      kubernetes.core.k8s:
+        state: absent
+        api_version: v1
+        kind: Service
+        name: gpt-oss-120b
+        namespace: "{{ model_namespace }}"
+      ignore_errors: true
+
+    - name: Delete Route gpt-oss-120b
+      kubernetes.core.k8s:
+        state: absent
+        api_version: route.openshift.io/v1
+        kind: Route
+        name: gpt-oss-120b
+        namespace: "{{ model_namespace }}"
+      ignore_errors: true
+
+    # -------------------------------------------------------------------------
+    # Optional Full Cleanup (namespace + PVCs)
+    # -------------------------------------------------------------------------
+
+    - name: Delete namespace {{ model_namespace }}
+      kubernetes.core.k8s:
+        state: absent
+        api_version: v1
+        kind: Namespace
+        name: "{{ model_namespace }}"
+      when: cleanup_all | bool
+
+    # -------------------------------------------------------------------------
+    # A100 MachineSet Scale-Down
+    # -------------------------------------------------------------------------
+
+    - name: Fetch existing MachineSets
+      kubernetes.core.k8s_info:
+        api_version: machine.openshift.io/v1beta1
+        kind: MachineSet
+        namespace: openshift-machine-api
+      register: machinesets_result
+
+    - name: Find A100 MachineSet
+      ansible.builtin.set_fact:
+        a100_machineset_resource: >-
+          {{
+            machinesets_result.resources
+            | selectattr('metadata.name', 'match', '^' + a100_machineset_prefix)
+            | list
+            | first
+            | default(none)
+          }}
+
+    - name: Scale A100 MachineSet to 0
+      kubernetes.core.k8s:
+        api_version: machine.openshift.io/v1beta1
+        kind: MachineSet
+        name: "{{ a100_machineset_resource.metadata.name }}"
+        namespace: openshift-machine-api
+        definition:
+          spec:
+            replicas: 0
+        merge_type: merge
+      when: a100_machineset_resource is not none
+
+    - name: Wait for A100 Machines to terminate
+      kubernetes.core.k8s_info:
+        api_version: machine.openshift.io/v1beta1
+        kind: Machine
+        namespace: openshift-machine-api
+        label_selectors:
+          - "machine.openshift.io/cluster-api-machineset={{ (a100_machineset_resource.metadata.name) | default('') }}"
+      register: machine_check
+      until:
+        - machine_check.resources | length == 0
+      retries: "{{ machine_retries | int }}"
+      delay: "{{ machine_delay | int }}"
+      when: a100_machineset_resource is not none
+
+    # -------------------------------------------------------------------------
+    # Teardown Summary
+    # -------------------------------------------------------------------------
+
+    - name: GPT-OSS-120B teardown complete
+      ansible.builtin.debug:
+        msg: >-
+          GPT-OSS-120B teardown complete.
+          - Workloads removed from {{ model_namespace }}
+          - A100 MachineSet scaled to 0
+          - PVCs preserved (use -e cleanup_all=true to remove)
+      when: not (cleanup_all | bool)
+
+    - name: GPT-OSS-120B teardown complete (full cleanup)
+      ansible.builtin.debug:
+        msg: >-
+          GPT-OSS-120B teardown complete.
+          - Workloads removed from {{ model_namespace }}
+          - A100 MachineSet scaled to 0
+          - Namespace and PVCs deleted
+      when: cleanup_all | bool

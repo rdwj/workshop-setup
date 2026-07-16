@@ -1,0 +1,166 @@
+# Deploys RedHatAI/gpt-oss-120b on OpenShift using vLLM with TP=8.
+# Single replica using all 8 GPUs of a p4d.24xlarge (8x A100 40GB).
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gpt-oss-120b-model
+  labels:
+    opendatahub.io/dashboard: "true"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gpt-oss-120b-cache
+  namespace: gpt-oss-120b-model
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 200Gi
+---
+# gpt-oss-120b supports OpenAI-compatible tool_calls in inference responses,
+# making it suitable for agentic and MCP workflows that require tool calling.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gpt-oss-120b
+  namespace: gpt-oss-120b-model
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: gpt-oss-120b
+  template:
+    metadata:
+      annotations:
+        io.kubernetes.cri-o.LogSizeMax: "104857600"
+      labels:
+        app: gpt-oss-120b
+    spec:
+      containers:
+        - name: vllm
+          image: registry.redhat.io/rhaiis/vllm-cuda-rhel9:3
+          command:
+            - vllm
+            - serve
+          args:
+            - RedHatAI/gpt-oss-120b
+            - --port
+            - "8000"
+            - --dtype
+            - auto
+            - --tensor-parallel-size
+            - "8"
+            - --max-model-len
+            - "131072"
+            - --gpu-memory-utilization
+            - "0.90"
+            - --max-num-seqs
+            - "8"
+            - --enforce-eager
+            - --enable-auto-tool-choice
+            - --tool-call-parser
+            - openai
+            - --enable-prefix-caching
+            - --enable-prompt-tokens-details
+            - --enable-server-load-tracking
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token
+                  key: token
+            - name: HOME
+              value: /tmp/home
+            - name: HF_HOME
+              value: /models/huggingface
+            - name: TRANSFORMERS_CACHE
+              value: /models/huggingface
+            - name: VLLM_CACHE_DIR
+              value: /models/vllm-cache
+            - name: XDG_CACHE_HOME
+              value: /tmp/cache
+            - name: HF_HUB_OFFLINE
+              value: "0"
+          ports:
+            - containerPort: 8000
+          resources:
+            requests:
+              cpu: "16"
+              memory: 128Gi
+              nvidia.com/gpu: "8"
+            limits:
+              cpu: "32"
+              memory: 256Gi
+              nvidia.com/gpu: "8"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 600
+            periodSeconds: 30
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 600
+            periodSeconds: 60
+            failureThreshold: 10
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+            - name: shm
+              mountPath: /dev/shm
+            - name: tmp-cache
+              mountPath: /tmp/cache
+            - name: tmp-home
+              mountPath: /tmp/home
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: gpt-oss-120b-cache
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Gi
+        - name: tmp-cache
+          emptyDir: {}
+        - name: tmp-home
+          emptyDir: {}
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gpt-oss-120b
+  namespace: gpt-oss-120b-model
+  labels:
+    app: gpt-oss-120b
+spec:
+  selector:
+    app: gpt-oss-120b
+  ports:
+    - port: 80
+      targetPort: 8000
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: gpt-oss-120b
+  namespace: gpt-oss-120b-model
+spec:
+  to:
+    kind: Service
+    name: gpt-oss-120b
+  port:
+    targetPort: 8000
+  tls:
+    termination: edge

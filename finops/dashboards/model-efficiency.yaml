@@ -1,0 +1,191 @@
+---
+apiVersion: perses.dev/v1alpha2
+kind: PersesDashboard
+metadata:
+  name: finops-model-efficiency
+  namespace: finops
+  labels:
+    app: finops
+spec:
+  config:
+    display:
+      name: "Model Efficiency"
+    duration: "1h"
+    variables: []
+    panels:
+      gpu-utilization:
+        kind: "Panel"
+        spec:
+          display:
+            name: "GPU Utilization (%)"
+          plugin:
+            kind: GaugeChart
+            spec:
+              queries:
+                - spec:
+                    plugin:
+                      kind: PrometheusTimeSeriesQuery
+                      spec:
+                        datasource:
+                          kind: PrometheusDatasource
+                          name: thanos-querier
+                        query: "finops:gpu_utilization_pct"
+      tokens-per-dollar:
+        kind: "Panel"
+        spec:
+          display:
+            name: "Tokens per Dollar"
+          plugin:
+            kind: StatChart
+            spec:
+              queries:
+                - spec:
+                    plugin:
+                      kind: PrometheusTimeSeriesQuery
+                      spec:
+                        datasource:
+                          kind: PrometheusDatasource
+                          name: thanos-querier
+                        query: "finops:tokens_per_dollar"
+      kv-cache-utilization:
+        kind: "Panel"
+        spec:
+          display:
+            name: "KV Cache Utilization"
+          plugin:
+            kind: TimeSeriesChart
+            spec:
+              queries:
+                - spec:
+                    plugin:
+                      kind: PrometheusTimeSeriesQuery
+                      spec:
+                        datasource:
+                          kind: PrometheusDatasource
+                          name: thanos-querier
+                        query: "finops:kv_cache_utilization"
+      gpu-memory-usage:
+        kind: "Panel"
+        spec:
+          display:
+            name: "GPU Memory Usage (%)"
+          plugin:
+            kind: TimeSeriesChart
+            spec:
+              queries:
+                - spec:
+                    plugin:
+                      kind: PrometheusTimeSeriesQuery
+                      spec:
+                        datasource:
+                          kind: PrometheusDatasource
+                          name: thanos-querier
+                        query: "finops:gpu_memory_used_pct"
+      request-queue-depth:
+        kind: "Panel"
+        spec:
+          display:
+            name: "Request Queue Depth"
+          plugin:
+            kind: TimeSeriesChart
+            spec:
+              queries:
+                - spec:
+                    plugin:
+                      kind: PrometheusTimeSeriesQuery
+                      spec:
+                        datasource:
+                          kind: PrometheusDatasource
+                          name: thanos-querier
+                        query: "vllm:num_requests_running"
+                - spec:
+                    plugin:
+                      kind: PrometheusTimeSeriesQuery
+                      spec:
+                        datasource:
+                          kind: PrometheusDatasource
+                          name: thanos-querier
+                        query: "vllm:num_requests_waiting"
+      latency-p50-p95:
+        kind: "Panel"
+        spec:
+          display:
+            name: "Latency P50 / P95"
+          plugin:
+            kind: TimeSeriesChart
+            spec:
+              queries:
+                - spec:
+                    plugin:
+                      kind: PrometheusTimeSeriesQuery
+                      spec:
+                        datasource:
+                          kind: PrometheusDatasource
+                          name: thanos-querier
+                        query: "finops:request_latency_p50"
+                - spec:
+                    plugin:
+                      kind: PrometheusTimeSeriesQuery
+                      spec:
+                        datasource:
+                          kind: PrometheusDatasource
+                          name: thanos-querier
+                        query: "finops:request_latency_p95"
+    layouts:
+      - kind: "Grid"
+        spec:
+          display:
+            title: "Resource Efficiency"
+            collapse:
+              open: true
+          items:
+            - x: 0
+              y: 0
+              width: 12
+              height: 6
+              content:
+                $ref: "#/spec/config/panels/gpu-utilization"
+            - x: 12
+              y: 0
+              width: 12
+              height: 6
+              content:
+                $ref: "#/spec/config/panels/tokens-per-dollar"
+      - kind: "Grid"
+        spec:
+          display:
+            title: "Resource Utilization"
+            collapse:
+              open: true
+          items:
+            - x: 0
+              y: 0
+              width: 12
+              height: 8
+              content:
+                $ref: "#/spec/config/panels/kv-cache-utilization"
+            - x: 12
+              y: 0
+              width: 12
+              height: 8
+              content:
+                $ref: "#/spec/config/panels/gpu-memory-usage"
+      - kind: "Grid"
+        spec:
+          display:
+            title: "Performance"
+            collapse:
+              open: true
+          items:
+            - x: 0
+              y: 0
+              width: 12
+              height: 8
+              content:
+                $ref: "#/spec/config/panels/request-queue-depth"
+            - x: 12
+              y: 0
+              width: 12
+              height: 8
+              content:
+                $ref: "#/spec/config/panels/latency-p50-p95"

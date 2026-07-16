@@ -1,0 +1,123 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gemma-model
+  labels:
+    opendatahub.io/dashboard: "true"
+---
+apiVersion: serving.kserve.io/v1alpha1
+kind: ServingRuntime
+metadata:
+  name: vllm-gemma4-runtime
+  namespace: gemma-model
+  labels:
+    opendatahub.io/dashboard: "true"
+  annotations:
+    opendatahub.io/apiProtocol: REST
+    opendatahub.io/template-display-name: "vLLM Gemma 4 Runtime (FIPS)"
+    opendatahub.io/template-name: vllm-gemma4-runtime
+    openshift.io/display-name: "vLLM Gemma 4 Runtime (FIPS)"
+spec:
+  annotations:
+    prometheus.io/port: "8080"
+    prometheus.io/path: "/metrics"
+    io.kubernetes.cri-o.LogSizeMax: "104857600"
+  multiModel: false
+  supportedModelFormats:
+    - autoSelect: true
+      name: vLLM
+  containers:
+    - name: kserve-container
+      image: image-registry.openshift-image-registry.svc:5000/gemma-build/vllm-gemma4-fips:latest
+      command:
+        - python3
+        - -m
+        - vllm.entrypoints.openai.api_server
+      args:
+        - --port=8080
+        - --model=/mnt/models
+        - --dtype=bfloat16
+        - --max-model-len=8192
+        - --gpu-memory-utilization=0.9
+        - --enable-prefix-caching
+        - --trust-remote-code
+        - --enable-auto-tool-choice
+        - --tool-call-parser=gemma4
+      env:
+        - name: VLLM_MM_HASHER_ALGORITHM
+          value: "sha256"
+        - name: HF_HOME
+          value: /tmp/hf-cache
+        - name: HOME
+          value: /tmp/home
+      ports:
+        - containerPort: 8080
+          protocol: TCP
+      resources:
+        requests:
+          cpu: "4"
+          memory: 16Gi
+        limits:
+          cpu: "8"
+          memory: 32Gi
+      volumeMounts:
+        - name: shm
+          mountPath: /dev/shm
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: shm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 4Gi
+    - name: tmp
+      emptyDir: {}
+---
+# Create this Secret separately with your own HuggingFace token:
+#   oc create secret generic hf-token -n gemma-model \
+#       --from-literal=token=hf_YOUR_TOKEN_HERE
+# The token must have access to google/gemma-4-E4B-it (accept license first
+# at https://huggingface.co/google/gemma-4-E4B-it).
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gemma-sa
+  namespace: gemma-model
+  annotations:
+    serving.kserve.io/s3-endpoint: ""
+    serving.kserve.io/s3-usehttps: ""
+secrets:
+  - name: hf-token
+---
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: gemma-4-e4b-it
+  namespace: gemma-model
+  labels:
+    opendatahub.io/dashboard: "true"
+  annotations:
+    serving.kserve.io/deploymentMode: RawDeployment
+    # Single-GPU deployments deadlock with RollingUpdate since the new pod
+    # can't acquire the GPU until the old pod releases it.
+    serving.kserve.io/deploymentStrategy: Recreate
+    openshift.io/display-name: "Gemma 4 E4B Instruct"
+spec:
+  predictor:
+    serviceAccountName: gemma-sa
+    model:
+      modelFormat:
+        name: vLLM
+      runtime: vllm-gemma4-runtime
+      storageUri: "hf://google/gemma-4-E4B-it"
+      resources:
+        requests:
+          nvidia.com/gpu: "1"
+        limits:
+          nvidia.com/gpu: "1"
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule

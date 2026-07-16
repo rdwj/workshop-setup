@@ -1,0 +1,191 @@
+---
+apiVersion: perses.dev/v1alpha2
+kind: PersesDashboard
+metadata:
+  name: finops-executive-summary
+  namespace: finops
+  labels:
+    app: finops
+spec:
+  config:
+    display:
+      name: "FinOps Executive Summary"
+    duration: "1h"
+    variables: []
+    panels:
+      monthly-projected-cost:
+        kind: "Panel"
+        spec:
+          display:
+            name: "Monthly Projected Cost ($)"
+          plugin:
+            kind: StatChart
+            spec:
+              queries:
+                - spec:
+                    plugin:
+                      kind: PrometheusTimeSeriesQuery
+                      spec:
+                        datasource:
+                          kind: PrometheusDatasource
+                          name: thanos-querier
+                        query: "sum(finops:gpu_cost_per_hour) * 730"
+      cost-per-request:
+        kind: "Panel"
+        spec:
+          display:
+            name: "Cost per Request ($)"
+          plugin:
+            kind: StatChart
+            spec:
+              queries:
+                - spec:
+                    plugin:
+                      kind: PrometheusTimeSeriesQuery
+                      spec:
+                        datasource:
+                          kind: PrometheusDatasource
+                          name: thanos-querier
+                        query: "sum(finops:gpu_cost_per_hour) / (sum(rate(vllm:e2e_request_latency_seconds_count[5m])) + 1e-10)"
+      self-hosted-savings:
+        kind: "Panel"
+        spec:
+          display:
+            name: "Self-Hosted Savings ($/hr)"
+          plugin:
+            kind: StatChart
+            spec:
+              queries:
+                - spec:
+                    plugin:
+                      kind: PrometheusTimeSeriesQuery
+                      spec:
+                        datasource:
+                          kind: PrometheusDatasource
+                          name: thanos-querier
+                        query: "(sum(rate(vllm:generation_tokens_total[5m])) * 3600 * 0.010 / 1000) - sum(finops:gpu_cost_per_hour)"
+      model-comparison:
+        kind: "Panel"
+        spec:
+          display:
+            name: "Model Comparison (Tokens/$)"
+          plugin:
+            kind: TimeSeriesChart
+            spec:
+              queries:
+                - spec:
+                    plugin:
+                      kind: PrometheusTimeSeriesQuery
+                      spec:
+                        datasource:
+                          kind: PrometheusDatasource
+                          name: thanos-querier
+                        query: "finops:tokens_per_dollar"
+      utilization-vs-cost:
+        kind: "Panel"
+        spec:
+          display:
+            name: "Utilization vs Cost"
+          plugin:
+            kind: TimeSeriesChart
+            spec:
+              queries:
+                - spec:
+                    plugin:
+                      kind: PrometheusTimeSeriesQuery
+                      spec:
+                        datasource:
+                          kind: PrometheusDatasource
+                          name: thanos-querier
+                        query: "finops:gpu_utilization_pct"
+                - spec:
+                    plugin:
+                      kind: PrometheusTimeSeriesQuery
+                      spec:
+                        datasource:
+                          kind: PrometheusDatasource
+                          name: thanos-querier
+                        query: "finops:gpu_cost_per_hour"
+      recommendations:
+        kind: "Panel"
+        spec:
+          display:
+            name: "FinOps Recommendations"
+          plugin:
+            kind: MarkdownChart
+            spec:
+              text: |
+                ## FinOps Best Practices
+
+                ### Cost Optimization
+                - Monitor GPU utilization and right-size deployments
+                - Use autoscaling to match demand patterns
+                - Consider spot instances for non-critical workloads
+
+                ### Efficiency Improvements
+                - Optimize batch sizes for throughput
+                - Enable KV cache for repeated queries
+                - Monitor token/$ metrics across models
+
+                ### Financial Planning
+                - Track monthly cost trends
+                - Compare self-hosted vs external API costs
+                - Allocate costs to teams/projects for chargeback
+    layouts:
+      - kind: "Grid"
+        spec:
+          display:
+            title: "Financial Summary"
+            collapse:
+              open: true
+          items:
+            - x: 0
+              y: 0
+              width: 8
+              height: 6
+              content:
+                $ref: "#/spec/config/panels/monthly-projected-cost"
+            - x: 8
+              y: 0
+              width: 8
+              height: 6
+              content:
+                $ref: "#/spec/config/panels/cost-per-request"
+            - x: 16
+              y: 0
+              width: 8
+              height: 6
+              content:
+                $ref: "#/spec/config/panels/self-hosted-savings"
+      - kind: "Grid"
+        spec:
+          display:
+            title: "Model Comparison"
+            collapse:
+              open: true
+          items:
+            - x: 0
+              y: 0
+              width: 12
+              height: 8
+              content:
+                $ref: "#/spec/config/panels/model-comparison"
+            - x: 12
+              y: 0
+              width: 12
+              height: 8
+              content:
+                $ref: "#/spec/config/panels/utilization-vs-cost"
+      - kind: "Grid"
+        spec:
+          display:
+            title: "Guidance"
+            collapse:
+              open: true
+          items:
+            - x: 0
+              y: 0
+              width: 24
+              height: 10
+              content:
+                $ref: "#/spec/config/panels/recommendations"

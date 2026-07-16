@@ -1,0 +1,225 @@
+# MCP Server Catalog
+# Add entries here and run `make apply` to update the RHOAI catalog.
+#
+# Each server generates entries in two ConfigMaps:
+#   1. gen-ai-aa-mcp-servers (redhat-ods-applications) — Playground dropdown
+#   2. mcp-catalog-sources (rhoai-model-registries) — MCP Catalog in dashboard
+#
+# Fields:
+#   name:               Unique identifier (kebab-case)
+#   display_name:       Human-readable name shown in the UI
+#   description:        Short description of what the server does
+#   url:                Full URL to the MCP endpoint
+#   provider:           Organization providing the server (default: "Red Hat")
+#   license:            SPDX license identifier (default: "Apache-2.0")
+#   version:            Server version string (default: "1.0.0")
+#   tags:               List of searchable tags
+#   gateway_registered: Whether the server is behind the MCP Gateway
+#   auth_required:      Whether authentication is needed
+#   transports:         List of supported transports (default: ["http"])
+#   tools:              List of tool definitions for the catalog
+#   readme:             Multiline readme text (optional)
+
+catalog_name: "Workshop MCP Servers"
+catalog_id: "workshop-mcp-catalog"
+catalog_label: "Red Hat"
+catalog_source: "Red Hat MCP"
+
+servers:
+  - name: calculus-mcp
+    display_name: "Calculus"
+    description: >-
+      Symbolic mathematics MCP server providing differentiation, integration,
+      limits, equation solving, Taylor series, ODE solving, and expression
+      simplification via SymPy. 8 tools available through the MCP Gateway.
+    url: "http://mcp-gateway.mcp-system.svc:8080/mcp"
+    provider: "Red Hat"
+    license: "Apache-2.0"
+    version: "1.0.0"
+    tags:
+      - mathematics
+      - calculus
+      - sympy
+    gateway_registered: true
+    auth_required: true
+    transports:
+      - http
+    documentation_url: "https://github.com/redhat-ai-americas/calculus-mcp"
+    repository_url: "https://github.com/redhat-ai-americas/calculus-mcp"
+    artifacts:
+      containerImage: "quay.io/redhat-ai-americas/calculus-mcp:latest"
+    runtimeMetadata:
+      defaultPort: 8080
+      mcpPath: /mcp
+      defaultArgs:
+        - --host
+        - "0.0.0.0"
+        - --port
+        - "8080"
+      prerequisites:
+        serviceAccount:
+          required: false
+        secrets: []
+        configMaps: []
+        environmentVariables:
+          - name: LOG_LEVEL
+            description: Logging verbosity
+            required: false
+            type: string
+      recommendedResources:
+        minimal:
+          cpu: "100m"
+          memory: "128Mi"
+        recommended:
+          cpu: "250m"
+          memory: "256Mi"
+      healthEndpoints:
+        liveness: /health
+        readiness: /health
+      capabilities:
+        requiresNetwork: false
+        requiresFileSystem: false
+        requiresGPU: false
+    readme: |
+      # Calculus MCP Server
+
+      Provides 8 symbolic math tools via Model Context Protocol.
+
+      ## Tools
+      - differentiate - Compute derivatives
+      - integrate - Compute integrals
+      - evaluate_limit - Compute limits
+      - evaluate_numeric - High-precision numerical evaluation
+      - simplify_expression - Algebraic simplification
+      - solve_equation - Solve equations
+      - solve_ode - Solve ODEs
+      - taylor_series - Taylor/Maclaurin series
+    tools:
+      - name: differentiate
+        description: "Compute ordinary, partial, or higher-order derivatives"
+        access_type: read_only
+      - name: integrate
+        description: "Compute indefinite or definite integrals"
+        access_type: read_only
+      - name: evaluate_limit
+        description: "Compute limits of expressions"
+        access_type: read_only
+      - name: evaluate_numeric
+        description: "High-precision numerical evaluation"
+        access_type: read_only
+      - name: simplify_expression
+        description: "Rewrite expressions in canonical forms"
+        access_type: read_only
+      - name: solve_equation
+        description: "Find symbolic or numerical roots"
+        access_type: read_only
+      - name: solve_ode
+        description: "Solve ordinary differential equations"
+        access_type: read_only
+      - name: taylor_series
+        description: "Compute Taylor/Maclaurin series expansions"
+        access_type: read_only
+
+  - name: openshift-mcp-server
+    display_name: "OpenShift-MCP-Server"
+    description: >-
+      MCP server for Red Hat OpenShift and Kubernetes cluster management.
+      Inspect pods, workloads, nodes, and cluster resources, view logs and
+      events, and browse configuration. Overrides built-in catalog entry
+      with working image and prerequisites.
+    url: "http://openshift-mcp.workshop-playground.svc.cluster.local:8080/mcp"
+    provider: "Red Hat"
+    license: "Apache-2.0"
+    version: "0.2.0"
+    tags:
+      - openshift
+      - kubernetes
+      - cluster-management
+    gateway_registered: true
+    auth_required: true
+    documentation_url: "https://github.com/openshift/openshift-mcp-server"
+    repository_url: "https://github.com/openshift/openshift-mcp-server"
+    artifacts:
+      containerImage: "quay.io/redhat-user-workloads/ocp-mcp-server-tenant/openshift-mcp-server-release-03:latest"
+    runtimeMetadata:
+      defaultPort: 8080
+      mcpPath: /mcp
+      defaultArgs:
+        - --config
+        - /etc/mcp-config/config.toml
+      prerequisites:
+        serviceAccount:
+          required: true
+          suggestedName: mcp-viewer
+          hint: "Needs 'view' ClusterRole for read-only cluster access"
+        configMaps:
+          - name: openshift-mcp-server-config
+            mountAsFile: true
+            mountPath: /etc/mcp-config
+            keys:
+              - key: config.toml
+                required: true
+                defaultContent: |
+                  log_level = 2
+                  port = "8080"
+                  read_only = true
+                  disable_destructive = true
+                  toolsets = ["core", "config"]
+
+                  [[denied_resources]]
+                  group = ""
+                  version = "v1"
+                  kind = "Secret"
+      recommendedResources:
+        minimal:
+          cpu: "100m"
+          memory: "256Mi"
+        recommended:
+          cpu: "250m"
+          memory: "512Mi"
+      healthEndpoints:
+        liveness: /healthz
+        readiness: /healthz
+    tools:
+      - name: configuration_view
+        description: "Get kubeconfig content"
+        access_type: read_only
+      - name: events_list
+        description: "List cluster events"
+        access_type: read_only
+      - name: namespaces_list
+        description: "List all namespaces"
+        access_type: read_only
+      - name: pods_list
+        description: "List all pods"
+        access_type: read_only
+      - name: pods_get
+        description: "Get a specific pod"
+        access_type: read_only
+      - name: pods_log
+        description: "Get pod logs"
+        access_type: read_only
+      - name: pods_list_in_namespace
+        description: "List pods in a namespace"
+        access_type: read_only
+      - name: pods_top
+        description: "Pod resource usage"
+        access_type: read_only
+      - name: nodes_log
+        description: "Get node logs"
+        access_type: read_only
+      - name: nodes_top
+        description: "Node resource usage"
+        access_type: read_only
+      - name: nodes_stats_summary
+        description: "Detailed node stats"
+        access_type: read_only
+      - name: projects_list
+        description: "List OpenShift projects"
+        access_type: read_only
+      - name: resources_get
+        description: "Get any resource by type and name"
+        access_type: read_only
+      - name: resources_list
+        description: "List resources by type"
+        access_type: read_only

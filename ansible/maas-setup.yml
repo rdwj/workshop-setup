@@ -1,0 +1,386 @@
+# Models-as-a-Service (MaaS) Setup for RHOAI 3.4
+#
+# Prerequisites: Run gateway-infrastructure.yml first
+#
+# Enables the MaaS feature on a cluster that already has RHOAI 3.4 installed
+# with Authorino, cert-manager, Service Mesh 3, and the base DSC.
+#
+# This playbook:
+#   1. Deploys in-cluster PostgreSQL for MaaS (optional)
+#   2. Creates the MaaS Gateway infrastructure and passthrough Routes
+#   3. Configures Authorino TLS in kuadrant-system
+#   4. Patches the DSC to enable MaaS
+#   5. Patches OdhDashboardConfig for MaaS UI features
+#   6. Verifies MaaS components are running
+#
+# Prerequisites:
+#   - RHOAI 3.4 installed with Authorino v1.3.0
+#   - Gateway infrastructure deployed (run gateway-infrastructure.yml)
+#   - DSC with modelsAsService.managementState: Removed
+#
+# Usage: cd ansible && ansible-playbook maas-setup.yml -i inventory/34-rhoai.yml
+#
+- name: Models-as-a-Service (MaaS) Setup for RHOAI 3.4
+  hosts: all
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      host: "{{ k8s_host }}"
+      api_key: "{{ k8s_api_key }}"
+      validate_certs: "{{ validate_certs }}"
+  vars:
+    manifest_base_dir: "{{ playbook_dir }}/.."
+    maas_deploy_postgres: true
+    maas_db_connection_url: ""
+    maas_gateway_class: ""
+
+    # Retry/delay settings
+    postgres_retries: 30
+    postgres_delay: 10
+    dsc_retries: 40
+    dsc_delay: 15
+    maas_verify_retries: 30
+    maas_verify_delay: 15
+
+  tasks:
+    # =========================================================================
+    # Phase 1: Deploy PostgreSQL (conditional)
+    # =========================================================================
+
+    - name: "Phase 1: Deploy in-cluster PostgreSQL"
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ doc }}"
+      loop: >-
+        {{
+          lookup('file', manifest_base_dir + '/maas/postgresql.yaml')
+          | from_yaml_all
+          | select('ne', none)
+          | list
+        }}
+      loop_control:
+        loop_var: doc
+        label: "{{ doc.kind }}/{{ doc.metadata.name }}"
+      when: maas_deploy_postgres | bool
+
+    - name: "Phase 1: Wait for PostgreSQL deployment to be available"
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: maas-postgresql
+        namespace: maas-postgresql
+      register: pg_deploy_check
+      until:
+        - pg_deploy_check.resources | length > 0
+        - pg_deploy_check.resources[0].status.readyReplicas | default(0) | int >= 1
+      retries: "{{ postgres_retries | int }}"
+      delay: "{{ postgres_delay | int }}"
+      when: maas_deploy_postgres | bool
+
+    - name: "Phase 1: Set DB connection URL for in-cluster PostgreSQL"
+      ansible.builtin.set_fact:
+        maas_db_url: "postgresql://maasadmin:REDACTED_PASSWORD@maas-postgresql.maas-postgresql.svc:5432/maasdb"
+      when: maas_deploy_postgres | bool
+
+    - name: "Phase 1: Set DB connection URL from variable"
+      ansible.builtin.set_fact:
+        maas_db_url: "{{ maas_db_connection_url }}"
+      when: not (maas_deploy_postgres | bool)
+
+    - name: "Phase 1: Create maas-db-config secret in redhat-ods-applications"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: maas-db-config
+            namespace: redhat-ods-applications
+          type: Opaque
+          stringData:
+            DB_CONNECTION_URL: "{{ maas_db_url }}"
+
+    # =========================================================================
+    # Phase 2: Create MaaS Gateway
+    # =========================================================================
+
+    - name: "Phase 2: Get cluster Ingress config for apps domain"
+      kubernetes.core.k8s_info:
+        api_version: config.openshift.io/v1
+        kind: Ingress
+        name: cluster
+      register: cluster_ingress
+
+    - name: "Phase 2: Set cluster apps domain"
+      ansible.builtin.set_fact:
+        cluster_apps_domain: "{{ cluster_ingress.resources[0].spec.domain }}"
+
+    - name: "Phase 2: Create models-as-a-service namespace"
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ doc }}"
+      loop: >-
+        {{
+          lookup('file', manifest_base_dir + '/maas/maas-namespace.yaml')
+          | from_yaml_all
+          | select('ne', none)
+          | list
+        }}
+      loop_control:
+        loop_var: doc
+        label: "{{ doc.kind }}/{{ doc.metadata.name }}"
+
+    - name: "Phase 2: Discover GatewayClass"
+      kubernetes.core.k8s_info:
+        api_version: gateway.networking.k8s.io/v1
+        kind: GatewayClass
+      register: gateway_classes
+      when: maas_gateway_class | length == 0
+
+    - name: "Phase 2: Set GatewayClass name"
+      ansible.builtin.set_fact:
+        maas_gateway_class: "{{ gateway_classes.resources[0].metadata.name }}"
+      when: maas_gateway_class | length == 0
+
+    - name: "Phase 2: Create MaaS Gateway infrastructure ConfigMap"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: maas-default-gateway-config
+            namespace: openshift-ingress
+          data:
+            service: |
+              metadata:
+                annotations:
+                  service.beta.openshift.io/serving-cert-secret-name: "maas-default-gateway-cert"
+              spec:
+                type: ClusterIP
+
+    - name: "Phase 2: Create MaaS Gateway"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: gateway.networking.k8s.io/v1
+          kind: Gateway
+          metadata:
+            name: maas-default-gateway
+            namespace: openshift-ingress
+            annotations:
+              opendatahub.io/managed: "false"
+              security.opendatahub.io/authorino-tls-bootstrap: "true"
+          spec:
+            gatewayClassName: "{{ maas_gateway_class }}"
+            infrastructure:
+              parametersRef:
+                group: ""
+                kind: ConfigMap
+                name: maas-default-gateway-config
+            listeners:
+              - name: maas-https
+                port: 443
+                protocol: HTTPS
+                tls:
+                  mode: Terminate
+                  certificateRefs:
+                    - name: maas-default-gateway-cert
+                allowedRoutes:
+                  namespaces:
+                    from: All
+
+    - name: "Phase 2: Create MaaS API Route"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: route.openshift.io/v1
+          kind: Route
+          metadata:
+            name: maas-gateway
+            namespace: openshift-ingress
+          spec:
+            host: "maas.{{ cluster_apps_domain }}"
+            to:
+              kind: Service
+              name: maas-default-gateway-data-science-gateway-class
+              weight: 100
+            port:
+              targetPort: "443"
+            tls:
+              termination: passthrough
+
+    - name: "Phase 2: Create MaaS inference Route"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: route.openshift.io/v1
+          kind: Route
+          metadata:
+            name: maas-inference-gateway
+            namespace: openshift-ingress
+          spec:
+            host: "inference.maas.{{ cluster_apps_domain }}"
+            to:
+              kind: Service
+              name: maas-default-gateway-data-science-gateway-class
+              weight: 100
+            port:
+              targetPort: "443"
+            tls:
+              termination: passthrough
+
+    # =========================================================================
+    # Phase 3: Configure Authorino TLS in kuadrant-system
+    # =========================================================================
+
+    - name: "Phase 3: Annotate Authorino service for serving cert"
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Service
+        name: authorino-authorino-authorization
+        namespace: kuadrant-system
+        definition:
+          metadata:
+            annotations:
+              service.beta.openshift.io/serving-cert-secret-name: authorino-server-cert
+        merge_type: merge
+
+    - name: "Phase 3: Patch Authorino CR for TLS listener"
+      kubernetes.core.k8s:
+        api_version: operator.authorino.kuadrant.io/v1beta1
+        kind: Authorino
+        name: authorino
+        namespace: kuadrant-system
+        definition:
+          spec:
+            listener:
+              tls:
+                enabled: true
+                certSecretRef:
+                  name: authorino-server-cert
+        merge_type: merge
+
+    - name: "Phase 3: Patch Authorino deployment with CA bundle env vars"
+      kubernetes.core.k8s:
+        api_version: apps/v1
+        kind: Deployment
+        name: authorino
+        namespace: kuadrant-system
+        definition:
+          spec:
+            template:
+              spec:
+                containers:
+                  - name: authorino
+                    env:
+                      - name: SSL_CERT_FILE
+                        value: /etc/ssl/certs/openshift-service-ca/service-ca-bundle.crt
+                      - name: REQUESTS_CA_BUNDLE
+                        value: /etc/ssl/certs/openshift-service-ca/service-ca-bundle.crt
+        merge_type: strategic-merge
+
+    # =========================================================================
+    # Phase 4: Patch DSC to enable MaaS
+    # =========================================================================
+
+    - name: "Phase 4: Patch DSC to set modelsAsService to Managed"
+      kubernetes.core.k8s:
+        api_version: datasciencecluster.opendatahub.io/v1
+        kind: DataScienceCluster
+        name: default-dsc
+        definition:
+          spec:
+            components:
+              kserve:
+                modelsAsService:
+                  managementState: Managed
+        merge_type: merge
+
+    - name: "Phase 4: Wait for DSC to return to Ready"
+      kubernetes.core.k8s_info:
+        api_version: datasciencecluster.opendatahub.io/v1
+        kind: DataScienceCluster
+        name: default-dsc
+      register: dsc_status
+      until:
+        - dsc_status.resources | default([]) | length > 0
+        - >-
+          dsc_status.resources[0].status.conditions | default([])
+          | selectattr('type', 'equalto', 'Ready')
+          | selectattr('status', 'equalto', 'True')
+          | list | length > 0
+      retries: "{{ dsc_retries | int }}"
+      delay: "{{ dsc_delay | int }}"
+
+    # =========================================================================
+    # Phase 5: Patch OdhDashboardConfig
+    # =========================================================================
+
+    - name: "Phase 5: Patch OdhDashboardConfig for MaaS UI features"
+      kubernetes.core.k8s:
+        api_version: opendatahub.io/v1alpha
+        kind: OdhDashboardConfig
+        name: odh-dashboard-config
+        namespace: redhat-ods-applications
+        definition:
+          spec:
+            dashboardConfig:
+              modelAsService: true
+              maasAuthPolicies: true
+              genAiStudio: true
+              mcpCatalog: true
+              disableModelRegistry: false
+              disableModelCatalog: false
+              vLLMDeploymentOnMaaS: true
+        merge_type: merge
+
+    # =========================================================================
+    # Phase 6: Verify MaaS Components
+    # =========================================================================
+
+    - name: "Phase 6: Check for MaaS CRDs"
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+      register: all_crds
+
+    - name: "Phase 6: Verify MaaS CRDs exist"
+      ansible.builtin.assert:
+        that:
+          - all_crds.resources | map(attribute='metadata.name') | select('search', 'maas.opendatahub.io') | list | length > 0
+        fail_msg: "No MaaS CRDs (maas.opendatahub.io) found. DSC MaaS enablement may have failed."
+        success_msg: "MaaS CRDs detected."
+
+    - name: "Phase 6: Wait for maas-api deployment"
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: maas-api
+        namespace: redhat-ods-applications
+      register: maas_api_check
+      until:
+        - maas_api_check.resources | length > 0
+        - maas_api_check.resources[0].status.readyReplicas | default(0) | int >= 1
+      retries: "{{ maas_verify_retries | int }}"
+      delay: "{{ maas_verify_delay | int }}"
+
+    - name: "Phase 6: Check for MaaS Tenant in models-as-a-service"
+      kubernetes.core.k8s_info:
+        api_version: maas.opendatahub.io/v1alpha1
+        kind: Tenant
+        namespace: models-as-a-service
+      register: maas_tenant
+      until:
+        - maas_tenant.resources | default([]) | length > 0
+      retries: "{{ maas_verify_retries | int }}"
+      delay: "{{ maas_verify_delay | int }}"
+
+    - name: MaaS setup complete
+      ansible.builtin.debug:
+        msg: >-
+          Models-as-a-Service is enabled.
+          MaaS Gateway: *.maas.{{ cluster_apps_domain }}
+          PostgreSQL: {{ 'in-cluster (maas-postgresql.maas-postgresql.svc)' if (maas_deploy_postgres | bool) else 'external' }}
+          MaaS API: running in redhat-ods-applications
+          Dashboard features: modelAsService, maasAuthPolicies, genAiStudio

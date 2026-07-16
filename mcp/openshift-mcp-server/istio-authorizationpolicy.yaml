@@ -1,0 +1,19 @@
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: mcp-gateway-require-jwt
+  namespace: gateway-system
+spec:
+  selector:
+    matchLabels:
+      gateway.networking.k8s.io/gateway-name: mcp-gateway
+  action: DENY
+  rules:
+    - from:
+        - source:
+            notRequestPrincipals: ["*"]
+      to:
+        - operation:
+            paths: ["/mcp*", "/sse*", "/message*"]
+            # Don't block well-known endpoints or health checks
+            notPaths: ["/.well-known/*", "/healthz", "/stats", "/metrics"]

@@ -1,0 +1,55 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: granite-vllm-metrics
+  namespace: granite-model
+spec:
+  endpoints:
+    - targetPort: 8000
+      path: /metrics
+      interval: 15s
+  selector:
+    matchLabels:
+      app: granite-3-3-8b-instruct
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: gpt-oss-vllm-metrics
+  namespace: gpt-oss-model
+spec:
+  endpoints:
+    - targetPort: 8080
+      path: /metrics
+      interval: 15s
+  selector:
+    matchLabels:
+      name: redhataigpt-oss-20b-metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: nemotron-vllm-metrics
+  namespace: nemotron-model
+spec:
+  endpoints:
+    - targetPort: 8080
+      path: /metrics
+      interval: 15s
+  selector:
+    matchLabels:
+      name: nemotron-14b-metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: judge-vllm-metrics
+  namespace: judge-model
+spec:
+  endpoints:
+    - targetPort: 8000
+      path: /metrics
+      interval: 15s
+  selector:
+    matchLabels:
+      app: prometheus-7b-v2

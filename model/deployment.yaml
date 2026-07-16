@@ -1,0 +1,106 @@
+# all-MiniLM-L6-v2 embedding model (384 dimensions). When registering with LlamaStack,
+# pass embedding_dimension=384 explicitly — the LlamaStack default of 768 causes a mismatch. See llamastack/llama-stack#5585.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: embedding-model
+  labels:
+    opendatahub.io/dashboard: "true"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: embedding-model-cache
+  namespace: embedding-model
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: all-minilm-l6-v2
+  namespace: embedding-model
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: all-minilm-l6-v2
+  template:
+    metadata:
+      labels:
+        app: all-minilm-l6-v2
+    spec:
+      containers:
+        - name: tei
+          image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.6
+          args:
+            - "--model-id"
+            - "sentence-transformers/all-MiniLM-L6-v2"
+            - "--port"
+            - "8080"
+          env:
+            - name: HF_HUB_CACHE
+              value: /data/models
+            - name: TRANSFORMERS_CACHE
+              value: /data/models
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 120
+            periodSeconds: 10
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            failureThreshold: 3
+          volumeMounts:
+            - name: cache
+              mountPath: /data
+      volumes:
+        - name: cache
+          persistentVolumeClaim:
+            claimName: embedding-model-cache
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: all-minilm-l6-v2
+  namespace: embedding-model
+spec:
+  selector:
+    app: all-minilm-l6-v2
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: all-minilm-l6-v2
+  namespace: embedding-model
+spec:
+  to:
+    kind: Service
+    name: all-minilm-l6-v2
+  port:
+    targetPort: 8080
+  tls:
+    termination: edge

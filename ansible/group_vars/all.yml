@@ -1,0 +1,75 @@
+validate_certs: false
+
+# RHOAI version selection — set this to choose which version to deploy.
+# Override at deploy time with: -e rhoai_version=3.2
+rhoai_version: "3.4"
+
+# GPU toggle — set to false for clusters without GPU nodes.
+# Override at deploy time with: -e enable_gpu=false
+enable_gpu: true
+
+# RHOAI version matrix — add new versions here.
+rhoai_versions:
+  "3.2":
+    csv_name: "rhods-operator.3.2.0"
+    channel: "fast-3.x"
+    starting_csv: "rhods-operator.3.2.0"
+    authorino_channel: "tech-preview-v1"
+  "3.3":
+    csv_name: "rhods-operator.3.3.1"
+    channel: "fast-3.x"
+    starting_csv: "rhods-operator.3.3.1"
+    authorino_channel: "tech-preview-v1"
+  "3.4":
+    csv_name: "rhods-operator.3.4.0"
+    channel: "stable-3.4"
+    starting_csv: "rhods-operator.3.4.0"
+    authorino_channel: "stable"
+
+# Derived RHOAI variables — do not set these directly.
+rhoai_csv_name: "{{ rhoai_versions[rhoai_version].csv_name }}"
+rhoai_channel: "{{ rhoai_versions[rhoai_version].channel }}"
+rhoai_starting_csv: "{{ rhoai_versions[rhoai_version].starting_csv }}"
+rhoai_authorino_channel: "{{ rhoai_versions[rhoai_version].authorino_channel | default('tech-preview-v1') }}"
+
+# GPU machineset parameters — change these per workshop class.
+gpu_instance_type: "g6e.4xlarge"
+gpu_disk_size_gb: 200
+gpu_replicas: 1
+gpu_taint_key: "nvidia.com/gpu"
+gpu_taint_effect: "NoSchedule"
+gpu_machineset_prefix: "gpu-"
+
+# Operator CSV versions — update when operators change.
+gpu_csv_name: "gpu-operator-certified.v25.3.4"
+nfd_csv_prefix: "nfd\\."
+
+# Operator namespaces.
+operator_namespaces_base:
+  - openshift-nfd
+  - redhat-ods-operator
+  - openshift-operators
+
+operator_namespaces_gpu:
+  - nvidia-gpu-operator
+
+operator_namespaces: "{{ operator_namespaces_base + (operator_namespaces_gpu if (enable_gpu | bool) else []) }}"
+
+# Timeout and retry settings (seconds).
+machineset_retries: 6
+machineset_delay: 5
+installplan_retries: 30
+installplan_delay: 10
+csv_retries: 40
+csv_delay: 15
+nfd_retries: 20
+nfd_delay: 15
+dsc_retries: 80
+dsc_delay: 15
+clusterpolicy_retries: 40
+clusterpolicy_delay: 15
+gpu_node_retries: 30
+gpu_node_delay: 30
+
+# Path to manifest files.
+manifest_base_dir: "{{ playbook_dir }}/.."

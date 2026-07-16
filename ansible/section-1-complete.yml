@@ -1,0 +1,87 @@
+# Section 1 Complete: Pre-import InstructLab workbench image
+#
+# This playbook applies state as if Section 1 was completed by a student.
+# Run it ONLY when teaching Section 2 without first teaching Section 1.
+#
+# WARNING: If you are teaching Section 1 in the same session, do NOT run this
+# playbook. Students create the InstructLab ImageStream themselves as part of
+# Section 1 Topic 2 (Custom Images exercise). Running this playbook first will
+# spoil that exercise.
+#
+# Usage: cd ansible && ansible-playbook section-1-complete.yml
+#
+- name: Apply Section 1 completion state — import InstructLab workbench image
+  hosts: all
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      host: "{{ k8s_host }}"
+      api_key: "{{ k8s_api_key }}"
+      validate_certs: "{{ validate_certs }}"
+  vars:
+    rhoai_namespace: redhat-ods-applications
+    imagestream_name: custom-instructlab-code-server
+    imagestream_wait_retries: 12
+    imagestream_wait_delay: 5
+
+  tasks:
+    - name: Import InstructLab Code Server workbench image
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: image.openshift.io/v1
+          kind: ImageStream
+          metadata:
+            name: "{{ imagestream_name }}"
+            namespace: "{{ rhoai_namespace }}"
+            labels:
+              # Marks this as a BYON (Bring Your Own Notebook) image imported via
+              # the dashboard "Import new image" form. These three labels are set
+              # by assembleBYONImageStream() in the odh-dashboard source.
+              app.kubernetes.io/created-by: byon
+              opendatahub.io/notebook-image: "true"
+              opendatahub.io/dashboard: "true"
+            annotations:
+              opendatahub.io/notebook-image-name: "InstructLab Code Server"
+              opendatahub.io/notebook-image-desc: >-
+                InstructLab workbench with VS Code (code-server) and CUDA support
+                for GPU-accelerated model customization
+              opendatahub.io/notebook-image-url: >-
+                quay.io/rh-aiservices-bu/instructlab-workbench-code-server-cuda:0.21.0
+              opendatahub.io/notebook-image-creator: admin
+              # JSON-encoded array of hardware profile identifiers — this is what
+              # the dashboard stores when a user picks a hardware profile identifier
+              # in the "Hardware profile identifier" field of the import form.
+              opendatahub.io/recommended-accelerators: '["nvidia.com/gpu"]'
+          spec:
+            lookupPolicy:
+              local: true
+            tags:
+              - name: "0.21.0"
+                from:
+                  kind: DockerImage
+                  name: quay.io/rh-aiservices-bu/instructlab-workbench-code-server-cuda:0.21.0
+                annotations:
+                  # URL the tag was imported from — set by ImageStreamSpecTagAnnotation.IMPORT_URL
+                  openshift.io/imported-from: >-
+                    quay.io/rh-aiservices-bu/instructlab-workbench-code-server-cuda:0.21.0
+                  # Empty JSON arrays: no software/package metadata provided at import time
+                  opendatahub.io/notebook-software: "[]"
+                  opendatahub.io/notebook-python-dependencies: "[]"
+
+    - name: Verify InstructLab ImageStream is present
+      kubernetes.core.k8s_info:
+        api_version: image.openshift.io/v1
+        kind: ImageStream
+        name: "{{ imagestream_name }}"
+        namespace: "{{ rhoai_namespace }}"
+      register: is_check
+      until:
+        - is_check.resources | length > 0
+      retries: "{{ imagestream_wait_retries | int }}"
+      delay: "{{ imagestream_wait_delay | int }}"
+
+    - name: Section 1 complete
+      ansible.builtin.debug:
+        msg: >-
+          InstructLab Code Server image imported. Section 2 Topic 2 will find it pre-imported.

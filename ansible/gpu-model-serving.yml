@@ -1,0 +1,336 @@
+# GPU + Model Serving Addon
+#
+# Adds GPU infrastructure and deploys the Granite 3.3 8B LLM to clusters
+# that already have RHOAI installed (via site.yml or setup-rhoai.sh).
+#
+# This playbook:
+#   1. Installs the NVIDIA GPU Operator (if not already installed)
+#   2. Creates a GPU MachineSet (g6e.4xlarge with nvidia.com/gpu taint)
+#   3. Applies the NVIDIA ClusterPolicy
+#   4. Waits for the GPU node to come online (~15 minutes)
+#   5. Deploys RedHatAI/granite-3.3-8b-instruct via vLLM
+#
+# Usage: cd ansible && ansible-playbook gpu-model-serving.yml
+#
+- name: GPU + Model Serving Addon — GPU Operator, MachineSet, ClusterPolicy, Granite LLM
+  hosts: all
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      host: "{{ k8s_host }}"
+      api_key: "{{ k8s_api_key }}"
+      validate_certs: "{{ validate_certs }}"
+  vars:
+    manifest_base_dir: "{{ playbook_dir }}/.."
+    gpu_namespace: nvidia-gpu-operator
+    model_namespace: granite-model
+    model_deployment_name: granite-3-3-8b-instruct
+    model_route_name: granite-3-3-8b-instruct
+    model_deploy_retries: 60
+    model_deploy_delay: 30
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # GPU Operator Installation
+    # -------------------------------------------------------------------------
+
+    - name: Create nvidia-gpu-operator namespace
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ gpu_namespace }}"
+
+    - name: Apply GPU operator OperatorGroup and Subscription
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ doc }}"
+      loop: >-
+        {{
+          lookup('file', manifest_base_dir + '/operators/gpu-operator.yaml')
+          | from_yaml_all
+          | select('ne', none)
+          | list
+        }}
+      loop_control:
+        loop_var: doc
+        label: "{{ doc.kind }}/{{ doc.metadata.name }}"
+
+    - name: Check if GPU operator CSV already succeeded
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        namespace: "{{ gpu_namespace }}"
+      register: gpu_csv_precheck
+
+    - name: Set GPU CSV already succeeded flag
+      ansible.builtin.set_fact:
+        gpu_csv_already_succeeded: >-
+          {{
+            gpu_csv_precheck.resources
+            | selectattr('status.phase', 'defined')
+            | selectattr('status.phase', 'equalto', 'Succeeded')
+            | list | length > 0
+          }}
+
+    - name: Wait for GPU operator InstallPlan
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: InstallPlan
+        namespace: "{{ gpu_namespace }}"
+      register: gpu_installplan_result
+      until:
+        - gpu_installplan_result.resources | selectattr('spec.approved', 'equalto', false) | list | length > 0
+      retries: "{{ installplan_retries | int }}"
+      delay: "{{ installplan_delay | int }}"
+      when: not gpu_csv_already_succeeded | bool
+
+    - name: Identify unapproved GPU InstallPlan
+      ansible.builtin.set_fact:
+        gpu_unapproved_plan: >-
+          {{
+            gpu_installplan_result.resources
+            | selectattr('spec.approved', 'equalto', false)
+            | map(attribute='metadata.name')
+            | first
+          }}
+      when: not gpu_csv_already_succeeded | bool
+
+    - name: Approve GPU operator InstallPlan
+      kubernetes.core.k8s:
+        api_version: operators.coreos.com/v1alpha1
+        kind: InstallPlan
+        name: "{{ gpu_unapproved_plan }}"
+        namespace: "{{ gpu_namespace }}"
+        definition:
+          spec:
+            approved: true
+        merge_type: merge
+      when: not gpu_csv_already_succeeded | bool
+
+    - name: GPU operator already installed, skipping install plan approval
+      ansible.builtin.debug:
+        msg: "GPU operator CSV already Succeeded in {{ gpu_namespace }}, skipping install plan approval"
+      when: gpu_csv_already_succeeded | bool
+
+    - name: Wait for GPU operator CSV to succeed
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        name: "{{ gpu_csv_name }}"
+        namespace: "{{ gpu_namespace }}"
+      register: gpu_csv
+      until:
+        - gpu_csv.resources | default([]) | length > 0
+        - (gpu_csv.resources | default([{}]))[0].status.phase | default('') == 'Succeeded'
+      retries: "{{ csv_retries | int }}"
+      delay: "{{ csv_delay | int }}"
+
+    # -------------------------------------------------------------------------
+    # GPU MachineSet Creation
+    # (Inlined from roles/workshop_cluster/tasks/gpu_machineset.yml)
+    # -------------------------------------------------------------------------
+
+    - name: Fetch existing worker MachineSets
+      kubernetes.core.k8s_info:
+        api_version: machine.openshift.io/v1beta1
+        kind: MachineSet
+        namespace: openshift-machine-api
+      register: machinesets_result
+
+    - name: Verify at least one MachineSet exists
+      ansible.builtin.assert:
+        that:
+          - machinesets_result.resources | length > 0
+        fail_msg: "No MachineSets found in openshift-machine-api. Is this an AWS cluster?"
+
+    - name: Select the first worker MachineSet
+      ansible.builtin.set_fact:
+        source_machineset: "{{ machinesets_result.resources | first }}"
+
+    - name: Build GPU MachineSet name
+      ansible.builtin.set_fact:
+        gpu_machineset_name: "{{ gpu_machineset_prefix }}{{ source_machineset.metadata.name }}"
+
+    - name: Construct GPU MachineSet definition
+      ansible.builtin.set_fact:
+        gpu_machineset: >-
+          {{
+            {
+              'apiVersion': source_machineset.apiVersion,
+              'kind': source_machineset.kind,
+              'metadata': {
+                'name': gpu_machineset_name,
+                'namespace': source_machineset.metadata.namespace,
+                'labels': source_machineset.metadata.labels | default({}),
+                'annotations': source_machineset.metadata.annotations | default({})
+              },
+              'spec': source_machineset.spec | combine({
+                'replicas': gpu_replicas,
+                'selector': {
+                  'matchLabels': source_machineset.spec.selector.matchLabels | combine({
+                    'machine.openshift.io/cluster-api-machineset': gpu_machineset_name
+                  })
+                },
+                'template': {
+                  'metadata': {
+                    'labels': source_machineset.spec.template.metadata.labels | combine({
+                      'machine.openshift.io/cluster-api-machineset': gpu_machineset_name
+                    })
+                  },
+                  'spec': source_machineset.spec.template.spec | combine({
+                    'providerSpec': {
+                      'value': source_machineset.spec.template.spec.providerSpec.value | combine({
+                        'instanceType': gpu_instance_type,
+                        'blockDevices': [{
+                          'ebs': source_machineset.spec.template.spec.providerSpec.value.blockDevices[0].ebs | combine({
+                            'volumeSize': gpu_disk_size_gb
+                          })
+                        }]
+                      }, recursive=true)
+                    },
+                    'taints': [{
+                      'key': gpu_taint_key,
+                      'value': '',
+                      'effect': gpu_taint_effect
+                    }]
+                  }, recursive=true)
+                }
+              }, recursive=true)
+            }
+          }}
+
+    - name: Apply GPU MachineSet
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ gpu_machineset }}"
+        server_side_apply:
+          field_manager: ansible
+          force_conflicts: true
+
+    - name: Verify GPU MachineSet instance type
+      kubernetes.core.k8s_info:
+        api_version: machine.openshift.io/v1beta1
+        kind: MachineSet
+        name: "{{ gpu_machineset_name }}"
+        namespace: openshift-machine-api
+      register: ms_check
+      until:
+        - ms_check.resources | length > 0
+        - ms_check.resources[0].spec.template.spec.providerSpec.value.instanceType == gpu_instance_type
+      retries: "{{ machineset_retries | int }}"
+      delay: "{{ machineset_delay | int }}"
+
+    - name: Verify GPU MachineSet replicas
+      kubernetes.core.k8s_info:
+        api_version: machine.openshift.io/v1beta1
+        kind: MachineSet
+        name: "{{ gpu_machineset_name }}"
+        namespace: openshift-machine-api
+      register: ms_replicas_check
+      until:
+        - ms_replicas_check.resources | length > 0
+        - ms_replicas_check.resources[0].spec.replicas == gpu_replicas
+      retries: "{{ machineset_retries | int }}"
+      delay: "{{ machineset_delay | int }}"
+
+    # -------------------------------------------------------------------------
+    # ClusterPolicy
+    # -------------------------------------------------------------------------
+
+    - name: Apply NVIDIA ClusterPolicy
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ doc }}"
+      loop: >-
+        {{
+          lookup('file', manifest_base_dir + '/gpu-operand/cluster-policy.yaml')
+          | from_yaml_all
+          | select('ne', none)
+          | list
+        }}
+      loop_control:
+        loop_var: doc
+        label: "{{ doc.kind }}/{{ doc.metadata.name }}"
+
+    - name: Wait for ClusterPolicy to be ready
+      kubernetes.core.k8s_info:
+        api_version: nvidia.com/v1
+        kind: ClusterPolicy
+        name: gpu-cluster-policy
+      register: cp_check
+      until:
+        - cp_check.resources | length > 0
+        - cp_check.resources[0].status.state | default('') == 'ready'
+      retries: "{{ clusterpolicy_retries | int }}"
+      delay: "{{ clusterpolicy_delay | int }}"
+
+    # -------------------------------------------------------------------------
+    # GPU Node Readiness (~15 minutes for node provisioning + driver init)
+    # -------------------------------------------------------------------------
+
+    - name: Wait for GPU node with nvidia.com/gpu capacity
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Node
+      register: gpu_node_check
+      until:
+        - >-
+          gpu_node_check.resources
+          | selectattr('status.capacity', 'defined')
+          | map(attribute='status.capacity')
+          | map('dict2items')
+          | flatten
+          | selectattr('key', 'equalto', 'nvidia.com/gpu')
+          | selectattr('value', 'ne', '0')
+          | list | length > 0
+      retries: "{{ gpu_node_retries | int }}"
+      delay: "{{ gpu_node_delay | int }}"
+
+    # -------------------------------------------------------------------------
+    # Granite Model Deployment
+    # -------------------------------------------------------------------------
+
+    - name: Apply Granite LLM manifest
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ doc }}"
+      loop: >-
+        {{
+          lookup('file', manifest_base_dir + '/model/granite-llm.yaml')
+          | from_yaml_all
+          | select('ne', none)
+          | list
+        }}
+      loop_control:
+        loop_var: doc
+        label: "{{ doc.kind }}/{{ doc.metadata.name }}"
+
+    - name: Wait for Granite deployment to be ready
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: "{{ model_deployment_name }}"
+        namespace: "{{ model_namespace }}"
+      register: model_deploy_check
+      until:
+        - model_deploy_check.resources | length > 0
+        - model_deploy_check.resources[0].status.readyReplicas | default(0) | int >= 1
+      retries: "{{ model_deploy_retries | int }}"
+      delay: "{{ model_deploy_delay | int }}"
+
+    - name: Get Granite route hostname
+      kubernetes.core.k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        name: "{{ model_route_name }}"
+        namespace: "{{ model_namespace }}"
+      register: granite_route
+
+    - name: GPU + model serving setup complete
+      ansible.builtin.debug:
+        msg: >-
+          Granite 3.3 8B is ready.
+          Endpoint: https://{{ granite_route.resources[0].spec.host }}/v1

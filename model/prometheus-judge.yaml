@@ -1,0 +1,143 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: judge-model
+  labels:
+    opendatahub.io/dashboard: "true"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: judge-model-cache
+  namespace: judge-model
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 30Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus-7b-v2
+  namespace: judge-model
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: prometheus-7b-v2
+  template:
+    metadata:
+      labels:
+        app: prometheus-7b-v2
+    spec:
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest
+          args:
+            - --model
+            - prometheus-eval/prometheus-7b-v2.0
+            - --port
+            - "8000"
+            - --dtype
+            - bfloat16
+            - --max-model-len
+            - "32768"
+            - --gpu-memory-utilization
+            - "0.9"
+            - --enable-prefix-caching
+            - --enable-prompt-tokens-details
+            - --enable-server-load-tracking
+          env:
+            - name: HOME
+              value: /tmp/home
+            - name: HF_HOME
+              value: /models/huggingface
+            - name: TRANSFORMERS_CACHE
+              value: /models/huggingface
+            - name: VLLM_CACHE_DIR
+              value: /models/vllm-cache
+            - name: XDG_CACHE_HOME
+              value: /tmp/cache
+          ports:
+            - containerPort: 8000
+          resources:
+            requests:
+              cpu: "2"
+              memory: 8Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "4"
+              memory: 16Gi
+              nvidia.com/gpu: "1"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 120
+            periodSeconds: 15
+            failureThreshold: 20
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            failureThreshold: 5
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+            - name: shm
+              mountPath: /dev/shm
+            - name: tmp-cache
+              mountPath: /tmp/cache
+            - name: tmp-home
+              mountPath: /tmp/home
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: judge-model-cache
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 2Gi
+        - name: tmp-cache
+          emptyDir: {}
+        - name: tmp-home
+          emptyDir: {}
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-7b-v2
+  namespace: judge-model
+  labels:
+    app: prometheus-7b-v2
+spec:
+  selector:
+    app: prometheus-7b-v2
+  ports:
+    - port: 80
+      targetPort: 8000
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: prometheus-7b-v2
+  namespace: judge-model
+spec:
+  to:
+    kind: Service
+    name: prometheus-7b-v2
+  port:
+    targetPort: 8000
+  tls:
+    termination: edge

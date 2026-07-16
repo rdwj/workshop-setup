@@ -1,0 +1,151 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mistral-model
+  labels:
+    opendatahub.io/dashboard: "true"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mistral-model-cache
+  namespace: mistral-model
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ministral-3-14b-instruct
+  namespace: mistral-model
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ministral-3-14b-instruct
+  template:
+    metadata:
+      labels:
+        app: ministral-3-14b-instruct
+    spec:
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest
+          args:
+            - --model
+            - mistralai/Ministral-3-14B-Instruct-2512
+            - --port
+            - "8000"
+            - --dtype
+            - bfloat16
+            - --max-model-len
+            - "16384"
+            - --gpu-memory-utilization
+            - "0.9"
+            - --enable-auto-tool-choice
+            - --tool-call-parser
+            - mistral
+            - --enable-prefix-caching
+            - --enable-prompt-tokens-details
+            - --enable-server-load-tracking
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token
+                  key: token
+            - name: HOME
+              value: /tmp/home
+            - name: HF_HOME
+              value: /models/huggingface
+            - name: TRANSFORMERS_CACHE
+              value: /models/huggingface
+            - name: VLLM_CACHE_DIR
+              value: /models/vllm-cache
+            - name: XDG_CACHE_HOME
+              value: /tmp/cache
+          ports:
+            - containerPort: 8000
+          resources:
+            requests:
+              cpu: "4"
+              memory: 16Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "8"
+              memory: 32Gi
+              nvidia.com/gpu: "1"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 180
+            periodSeconds: 15
+            failureThreshold: 20
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 180
+            periodSeconds: 30
+            failureThreshold: 5
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+            - name: shm
+              mountPath: /dev/shm
+            - name: tmp-cache
+              mountPath: /tmp/cache
+            - name: tmp-home
+              mountPath: /tmp/home
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: mistral-model-cache
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+        - name: tmp-cache
+          emptyDir: {}
+        - name: tmp-home
+          emptyDir: {}
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ministral-3-14b-instruct
+  namespace: mistral-model
+  labels:
+    app: ministral-3-14b-instruct
+spec:
+  selector:
+    app: ministral-3-14b-instruct
+  ports:
+    - port: 80
+      targetPort: 8000
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: ministral-3-14b-instruct
+  namespace: mistral-model
+spec:
+  to:
+    kind: Service
+    name: ministral-3-14b-instruct
+  port:
+    targetPort: 8000
+  tls:
+    termination: edge

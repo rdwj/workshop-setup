@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gen-ai-aa-mcp-servers
+  namespace: redhat-ods-applications
+data:
+  MCP-Gateway: |
+    {
+      "url": "http://GATEWAY_ELB:8080/mcp",
+      "description": "MCP Gateway — OpenShift cluster tools (auth required)"
+    }

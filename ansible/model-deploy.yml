@@ -1,0 +1,80 @@
+# GPT-OSS-20B Model Deployment
+#
+# Deploys the RedHatAI/gpt-oss-20b vLLM model to workshop clusters.
+# The model takes ~10 minutes for the model to load from the OCI modelcar
+# image and will consume the cluster's single GPU.
+#
+# Prerequisites:
+#   - site.yml must have been run (RHOAI + GPU infrastructure)
+#   - A GPU node must be available with nvidia.com/gpu capacity
+#
+# Usage: cd ansible && ansible-playbook model-deploy.yml
+#
+- name: GPT-OSS-20B Model Deployment
+  hosts: all
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      host: "{{ k8s_host }}"
+      api_key: "{{ k8s_api_key }}"
+      validate_certs: "{{ validate_certs }}"
+  vars:
+    manifest_base_dir: "{{ playbook_dir }}/.."
+    model_namespace: gpt-oss-model
+    model_isvc_name: redhataigpt-oss-20b
+    model_deploy_retries: 40
+    model_deploy_delay: 30
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # Phase 1: Create namespace
+    # -------------------------------------------------------------------------
+
+    - name: "Phase 1: Create gpt-oss-model namespace"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ model_namespace }}"
+            labels:
+              opendatahub.io/dashboard: "true"
+
+    # -------------------------------------------------------------------------
+    # Phase 2: Apply model deployment
+    # -------------------------------------------------------------------------
+
+    - name: "Phase 2: Apply GPT-OSS-20B deployment manifest"
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ manifest_base_dir }}/operands/gpt-oss-20b-deployment.yaml"
+
+    # -------------------------------------------------------------------------
+    # Phase 3: Wait for model readiness
+    # -------------------------------------------------------------------------
+
+    - name: "Phase 3: Wait for GPT-OSS-20B InferenceService to be ready"
+      kubernetes.core.k8s_info:
+        api_version: serving.kserve.io/v1beta1
+        kind: InferenceService
+        name: "{{ model_isvc_name }}"
+        namespace: "{{ model_namespace }}"
+      register: model_isvc_check
+      until:
+        - model_isvc_check.resources | length > 0
+        - model_isvc_check.resources[0].status is defined
+        - model_isvc_check.resources[0].status.conditions is defined
+        - model_isvc_check.resources[0].status.conditions | selectattr('type', 'equalto', 'Ready') | selectattr('status', 'equalto', 'True') | list | length > 0
+      retries: "{{ model_deploy_retries | int }}"
+      delay: "{{ model_deploy_delay | int }}"
+
+    # -------------------------------------------------------------------------
+    # Phase 4: Display model endpoint
+    # -------------------------------------------------------------------------
+
+    - name: "Phase 4: Display model endpoint"
+      ansible.builtin.debug:
+        msg: >-
+          GPT-OSS-20B is ready.
+          Endpoint: {{ model_isvc_check.resources[0].status.url }}/v1

@@ -1,0 +1,150 @@
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: finops-cost-rules
+  namespace: finops
+  labels:
+    app: finops
+spec:
+  groups:
+    - name: finops.cost
+      interval: 60s
+      rules:
+        # GPU node cost per hour per model namespace
+        # Each running GPU pod costs $1.40/hr (g6e.4xlarge on-demand)
+        - record: finops:gpu_cost_per_hour
+          expr: |
+            count by (namespace) (
+              kube_pod_info{namespace=~"gpt-oss-model|nemotron-model"}
+              * on(pod, namespace) group_left()
+              kube_pod_container_resource_requests{resource="nvidia.com/gpu", namespace=~"gpt-oss-model|nemotron-model"}
+            ) * 1.40
+
+        # Total token generation rate per model (tokens/second)
+        - record: finops:token_rate_per_second
+          expr: |
+            sum by (namespace, model_name) (
+              rate(vllm:generation_tokens_total[5m])
+            )
+
+        # Dynamic cost per 1K tokens for self-hosted models
+        # Lower is better — driven by utilization
+        - record: finops:self_hosted_cost_per_1k_tokens
+          expr: |
+            1.40 / 3600
+            / (sum by (namespace) (rate(vllm:generation_tokens_total[5m])) + 1e-10)
+            * 1000
+
+        # Hourly token throughput per model
+        - record: finops:tokens_per_hour
+          expr: |
+            sum by (namespace, model_name) (
+              rate(vllm:generation_tokens_total[5m])
+            ) * 3600
+
+        # GPU utilization percentage (from DCGM)
+        - record: finops:gpu_utilization_pct
+          expr: |
+            avg by (namespace) (
+              DCGM_FI_DEV_GPU_UTIL{namespace=~"gpt-oss-model|nemotron-model"}
+            )
+
+        # GPU memory utilization (from DCGM)
+        - record: finops:gpu_memory_used_pct
+          expr: |
+            avg by (namespace) (
+              DCGM_FI_DEV_FB_USED{namespace=~"gpt-oss-model|nemotron-model"}
+              / (DCGM_FI_DEV_FB_USED{namespace=~"gpt-oss-model|nemotron-model"}
+                 + DCGM_FI_DEV_FB_FREE{namespace=~"gpt-oss-model|nemotron-model"})
+            ) * 100
+
+        # KV cache utilization (vLLM metric)
+        - record: finops:kv_cache_utilization
+          expr: |
+            avg by (namespace, model_name) (
+              vllm:kv_cache_usage_perc
+            )
+
+        # Request latency P50 and P95 per model
+        - record: finops:request_latency_p50
+          expr: |
+            histogram_quantile(0.50,
+              sum by (namespace, le) (
+                rate(vllm:e2e_request_latency_seconds_bucket[5m])
+              )
+            )
+
+        - record: finops:request_latency_p95
+          expr: |
+            histogram_quantile(0.95,
+              sum by (namespace, le) (
+                rate(vllm:e2e_request_latency_seconds_bucket[5m])
+              )
+            )
+
+        # Estimated daily cost per model namespace
+        - record: finops:estimated_daily_cost
+          expr: |
+            finops:gpu_cost_per_hour * 24
+
+        # Cost efficiency: tokens generated per dollar
+        - record: finops:tokens_per_dollar
+          expr: |
+            finops:tokens_per_hour
+            / (finops:gpu_cost_per_hour + 1e-10)
+
+    - name: finops.maas_showback
+      interval: 60s
+      rules:
+        # Per-user token cost (authorized_hits × cost-per-token)
+        - record: finops:user_cost_per_hour
+          expr: |
+            sum by (user, model) (
+              rate(authorized_hits[5m])
+            ) * 3600
+            * 1.40 / (sum(rate(vllm:generation_tokens_total[5m])) + 1e-10)
+
+        # Per-subscription token usage (24h rolling)
+        - record: finops:subscription_tokens_24h
+          expr: |
+            sum by (subscription, model) (
+              increase(authorized_hits[24h])
+            )
+
+        # Per-user token usage (24h rolling)
+        - record: finops:user_tokens_24h
+          expr: |
+            sum by (user, model) (
+              increase(authorized_hits[24h])
+            )
+
+        # Rate limit hit ratio (shows who is being throttled)
+        - record: finops:rate_limit_ratio
+          expr: |
+            sum by (user, subscription) (rate(limited_calls[5m]))
+            / (sum by (user, subscription) (rate(authorized_hits[5m])) + 1e-10)
+
+    - name: finops.alerts
+      rules:
+        # Alert when GPU utilization is below 20% for 1 hour (wasting money)
+        - alert: FinOpsLowGPUUtilization
+          expr: finops:gpu_utilization_pct < 20
+          for: 1h
+          labels:
+            severity: warning
+            team: finops
+          annotations:
+            summary: "GPU underutilized in {{ $labels.namespace }}"
+            description: "GPU utilization is {{ $value }}% in namespace {{ $labels.namespace }}. Consider scaling down or consolidating workloads."
+
+        # Alert when cost-per-token exceeds external API pricing
+        - alert: FinOpsSelfHostedMoreExpensive
+          expr: finops:self_hosted_cost_per_1k_tokens > 0.010
+          for: 30m
+          labels:
+            severity: info
+            team: finops
+          annotations:
+            summary: "Self-hosted model in {{ $labels.namespace }} costs more per token than external API"
+            description: "Current cost per 1K tokens is ${{ $value }}. Consider routing traffic to external API for cost savings."

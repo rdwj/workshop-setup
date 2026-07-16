@@ -1,0 +1,219 @@
+# GPT-OSS-120B Ephemeral A100 Deployment — Spin Up
+#
+# Creates a p4d.24xlarge (8x A100 40GB) MachineSet, waits for the node,
+# and deploys a single TP=8 replica of RedHatAI/gpt-oss-120b-FP8-dynamic.
+# PVCs persist across teardown cycles — only the first run downloads
+# the ~120GB model weights.
+#
+# Prerequisites: GPU operator and NFD must be installed (via site.yml).
+#
+# Usage: cd ansible && ansible-playbook gpt-oss-120b-up.yml -i inventory/mcp-rhoai.yml
+- name: GPT-OSS-120B Ephemeral A100 Deployment — Create MachineSet, Deploy Model
+  hosts: all
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      host: "{{ k8s_host }}"
+      api_key: "{{ k8s_api_key }}"
+      validate_certs: "{{ validate_certs }}"
+  vars:
+    manifest_base_dir: "{{ playbook_dir }}/.."
+    a100_machineset_prefix: "a100-"
+    a100_instance_type: "p4d.24xlarge"
+    a100_disk_size_gb: 500
+    model_namespace: gpt-oss-120b-model
+    model_deploy_retries: 60
+    model_deploy_delay: 30
+    node_gpu_count: 8
+    node_retries: 40
+    node_delay: 30
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # A100 MachineSet — create if absent, scale to 1 if already present
+    # -------------------------------------------------------------------------
+
+    - name: Fetch existing MachineSets
+      kubernetes.core.k8s_info:
+        api_version: machine.openshift.io/v1beta1
+        kind: MachineSet
+        namespace: openshift-machine-api
+      register: machinesets_result
+
+    - name: Verify at least one MachineSet exists
+      ansible.builtin.assert:
+        that:
+          - machinesets_result.resources | length > 0
+        fail_msg: "No MachineSets found in openshift-machine-api. Is this an AWS cluster?"
+
+    - name: Check if A100 MachineSet already exists
+      ansible.builtin.set_fact:
+        a100_machineset_exists: >-
+          {{
+            machinesets_result.resources
+            | selectattr('metadata.name', 'match', '^' + a100_machineset_prefix)
+            | list
+            | length > 0
+          }}
+        a100_machineset_resource: >-
+          {{
+            machinesets_result.resources
+            | selectattr('metadata.name', 'match', '^' + a100_machineset_prefix)
+            | list
+            | first
+            | default({})
+          }}
+
+    - name: Select first worker MachineSet as template
+      ansible.builtin.set_fact:
+        source_machineset: "{{ machinesets_result.resources | first }}"
+      when: not a100_machineset_exists
+
+    - name: Build A100 MachineSet name
+      ansible.builtin.set_fact:
+        a100_machineset_name: "{{ a100_machineset_prefix + source_machineset.metadata.name }}"
+      when: not a100_machineset_exists
+
+    - name: Construct A100 MachineSet definition
+      ansible.builtin.set_fact:
+        a100_machineset: >-
+          {{
+            {
+              'apiVersion': source_machineset.apiVersion,
+              'kind': source_machineset.kind,
+              'metadata': {
+                'name': a100_machineset_name,
+                'namespace': source_machineset.metadata.namespace,
+                'labels': source_machineset.metadata.labels | default({}),
+                'annotations': source_machineset.metadata.annotations | default({})
+              },
+              'spec': source_machineset.spec | combine({
+                'replicas': 1,
+                'selector': {
+                  'matchLabels': source_machineset.spec.selector.matchLabels | combine({
+                    'machine.openshift.io/cluster-api-machineset': a100_machineset_name
+                  })
+                },
+                'template': {
+                  'metadata': {
+                    'labels': source_machineset.spec.template.metadata.labels | combine({
+                      'machine.openshift.io/cluster-api-machineset': a100_machineset_name
+                    })
+                  },
+                  'spec': source_machineset.spec.template.spec | combine({
+                    'providerSpec': {
+                      'value': source_machineset.spec.template.spec.providerSpec.value | combine({
+                        'instanceType': a100_instance_type,
+                        'blockDevices': [{
+                          'ebs': source_machineset.spec.template.spec.providerSpec.value.blockDevices[0].ebs | combine({
+                            'volumeSize': a100_disk_size_gb | int,
+                            'volumeType': 'gp3'
+                          })
+                        }]
+                      }, recursive=true)
+                    },
+                    'taints': [{
+                      'key': gpu_taint_key,
+                      'value': '',
+                      'effect': gpu_taint_effect
+                    }]
+                  }, recursive=true)
+                }
+              }, recursive=true)
+            }
+          }}
+      when: not a100_machineset_exists
+
+    - name: Apply A100 MachineSet
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ a100_machineset }}"
+        server_side_apply:
+          field_manager: ansible
+          force_conflicts: true
+      when: not a100_machineset_exists
+
+    - name: Set MachineSet name fact from existing resource
+      ansible.builtin.set_fact:
+        a100_machineset_name: "{{ a100_machineset_resource.metadata.name }}"
+      when: a100_machineset_exists
+
+    - name: Patch A100 MachineSet to 1 replica
+      kubernetes.core.k8s:
+        api_version: machine.openshift.io/v1beta1
+        kind: MachineSet
+        name: "{{ a100_machineset_name }}"
+        namespace: openshift-machine-api
+        definition:
+          spec:
+            replicas: 1
+        merge_type: merge
+      when: a100_machineset_exists
+
+    # -------------------------------------------------------------------------
+    # Wait for A100 node with 8 GPUs
+    # -------------------------------------------------------------------------
+
+    - name: Wait for node with {{ node_gpu_count }} GPUs (nvidia.com/gpu capacity)
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Node
+      register: gpu_node_check
+      until:
+        - >-
+          gpu_node_check.resources
+          | selectattr('status.capacity', 'defined')
+          | map(attribute='status.capacity')
+          | map('dict2items')
+          | flatten
+          | selectattr('key', 'equalto', 'nvidia.com/gpu')
+          | selectattr('value', 'equalto', node_gpu_count | string)
+          | list | length >= 1
+      retries: "{{ node_retries | int }}"
+      delay: "{{ node_delay | int }}"
+
+    # -------------------------------------------------------------------------
+    # GPT-OSS-120B Model Deployment
+    # -------------------------------------------------------------------------
+
+    - name: Apply GPT-OSS-120B manifest
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ doc }}"
+      loop: >-
+        {{
+          lookup('file', manifest_base_dir + '/model/gpt-oss-120b.yaml')
+          | from_yaml_all
+          | select('ne', none)
+          | list
+        }}
+      loop_control:
+        loop_var: doc
+        label: "{{ doc.kind }}/{{ doc.metadata.name }}"
+
+    - name: Wait for Deployment gpt-oss-120b to be ready
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: gpt-oss-120b
+        namespace: "{{ model_namespace }}"
+      register: model_deploy_check
+      until:
+        - model_deploy_check.resources | length > 0
+        - model_deploy_check.resources[0].status.readyReplicas | default(0) | int >= 1
+      retries: "{{ model_deploy_retries | int }}"
+      delay: "{{ model_deploy_delay | int }}"
+
+    - name: Get GPT-OSS-120B route hostname
+      kubernetes.core.k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        name: gpt-oss-120b
+        namespace: "{{ model_namespace }}"
+      register: gpt_oss_120b_route
+
+    - name: GPT-OSS-120B deployment complete
+      ansible.builtin.debug:
+        msg: >-
+          GPT-OSS-120B is ready.
+          Endpoint: https://{{ gpt_oss_120b_route.resources[0].spec.host }}/v1

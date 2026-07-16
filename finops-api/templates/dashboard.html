@@ -1,0 +1,1479 @@
+<!DOCTYPE html>
+<html lang="en" class="pf-v6-theme-dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FinOps Dashboard</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@patternfly/patternfly@6/patternfly.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<style>
+  /* Two-column dashboard grid -- PatternFly has no dashboard-specific layout */
+  .dashboard-grid {
+    display: grid;
+    grid-template-columns: 1fr 340px;
+    grid-template-rows: auto auto auto;
+    gap: 0;
+    min-height: calc(100vh - 140px);
+  }
+  @media (max-width: 900px) {
+    .dashboard-grid { grid-template-columns: 1fr; grid-template-rows: auto auto auto auto; }
+    .dashboard-sidebar { border-left: none !important; }
+  }
+
+  /* Chart container sizing */
+  .chart-container { position: relative; width: 100%; height: 180px; }
+  .chart-empty {
+    display: flex; align-items: center; justify-content: center;
+    height: 180px;
+    color: var(--pf-t--global--text--color--subtle);
+    font-size: var(--pf-t--global--font--size--body-default);
+  }
+  .chart-empty .dot-pulse {
+    display: inline-block; width: 6px; height: 6px;
+    background: var(--pf-t--global--text--color--subtle);
+    border-radius: 50%; margin-left: 8px;
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%,80%,100% { opacity: .3; transform: scale(.8) }
+    40% { opacity: 1; transform: scale(1.1) }
+  }
+
+  /* Sparkline canvas sizing */
+  .spark-wrap { margin-top: 6px; height: 40px; width: 100%; max-width: 200px; }
+
+  /* Sidebar layout */
+  .dashboard-sidebar {
+    border-left: 1px solid var(--pf-t--global--border--color--default);
+  }
+
+  /* Table panel spans full width */
+  .table-panel { grid-column: 1 / -1; }
+
+  /* Stat card big number */
+  .stat-big-num {
+    font-family: var(--pf-t--global--font--family--mono);
+    font-size: var(--pf-t--global--font--size--heading-h1);
+    font-weight: var(--pf-t--global--font--weight--bold);
+    line-height: 1.2;
+  }
+
+  /* Mono text helper */
+  .mono { font-family: var(--pf-t--global--font--family--mono); }
+
+  /* Modal overlay */
+  .modal-backdrop {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,.6);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 1000;
+  }
+  .modal-box {
+    background: var(--pf-t--global--background--color--primary--default);
+    border: 1px solid var(--pf-t--global--border--color--default);
+    border-radius: 8px;
+    width: 90%; max-width: 720px; max-height: 80vh;
+    display: flex; flex-direction: column;
+  }
+  .modal-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 16px 24px; border-bottom: 1px solid var(--pf-t--global--border--color--default);
+  }
+  .modal-body { padding: 24px; overflow-y: auto; flex: 1; }
+  .modal-body pre {
+    background: var(--pf-t--global--background--color--secondary--default);
+    border: 1px solid var(--pf-t--global--border--color--default);
+    border-radius: 6px; padding: 16px; overflow-x: auto;
+    font-family: var(--pf-t--global--font--family--mono);
+    font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-all;
+  }
+  .code-block-wrap { position: relative; margin-bottom: 16px; }
+  .code-block-wrap .copy-btn {
+    position: absolute; top: 8px; right: 8px;
+  }
+  .tab-bar { display: flex; gap: 0; border-bottom: 1px solid var(--pf-t--global--border--color--default); margin-bottom: 16px; }
+  .tab-bar button {
+    background: none; border: none; border-bottom: 2px solid transparent;
+    padding: 8px 16px; cursor: pointer;
+    color: var(--pf-t--global--text--color--subtle);
+    font-size: 14px; font-weight: 500;
+  }
+  .tab-bar button.active {
+    color: var(--pf-t--global--text--color--regular);
+    border-bottom-color: var(--pf-t--global--color--brand--default);
+  }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  /* Header toolbar */
+  .header-toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .header-actions { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+
+  /* Empty state spinner */
+  .empty-spinner {
+    width: 32px; height: 32px;
+    border: 3px solid var(--pf-t--global--border--color--default);
+    border-top-color: var(--pf-t--global--color--brand--default);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+    margin-bottom: var(--pf-t--global--spacer--md);
+  }
+  @keyframes spin { to { transform: rotate(360deg) } }
+
+  /* vLLM Performance stat grid */
+  .perf-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 16px;
+  }
+  .perf-stat { text-align: center; }
+  .perf-stat .perf-value {
+    font-family: var(--pf-t--global--font--family--mono);
+    font-size: 20px;
+    font-weight: 700;
+  }
+  .perf-stat .perf-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--pf-t--global--text--color--subtle);
+    margin-top: 2px;
+  }
+</style>
+</head>
+<body>
+
+<div style="padding:24px 32px 20px;border-bottom:1px solid var(--pf-t--global--border--color--default)">
+  <h1 class="pf-v6-c-title pf-m-2xl">Model-as-a-Service &mdash; FinOps Dashboard</h1>
+  <div class="pf-v6-c-content" style="margin:8px 0 16px">
+    <p>Per-user token usage and cost tracking</p>
+  </div>
+  <div class="header-toolbar">
+    <span class="pf-v6-c-label pf-m-blue" id="chip-model">
+      <span class="pf-v6-c-label__content"><span class="pf-v6-c-label__text">Model --</span></span>
+    </span>
+    <span class="pf-v6-c-label pf-m-purple" id="chip-instance">
+      <span class="pf-v6-c-label__content"><span class="pf-v6-c-label__text">Instance --</span></span>
+    </span>
+    <span class="pf-v6-c-label pf-m-cyan" id="chip-updated">
+      <span class="pf-v6-c-label__content"><span class="pf-v6-c-label__text">Connecting...</span></span>
+    </span>
+    <div class="header-actions">
+      <label class="pf-v6-c-switch" id="theme-switch">
+        <input class="pf-v6-c-switch__input" type="checkbox" id="theme-toggle" checked>
+        <span class="pf-v6-c-switch__toggle"></span>
+        <span class="pf-v6-c-switch__label">Dark mode</span>
+      </label>
+      <button class="pf-v6-c-button pf-m-secondary pf-m-small" type="button" onclick="showCodeModal()">API Code</button>
+      <button class="pf-v6-c-button pf-m-secondary pf-m-small" type="button" onclick="showJsonModal()">View JSON</button>
+    </div>
+  </div>
+</div>
+
+<div style="padding:0 24px">
+      <div class="dashboard-grid" id="dashboard-grid">
+
+        <!-- Left: Per-model charts -->
+        <div class="pf-v6-u-p-lg" id="chart-panel">
+          <div id="model-charts" class="pf-v6-l-stack pf-m-gutter">
+            <!-- JS will create one card per model -->
+            <div class="pf-v6-c-card" id="chart-placeholder-card">
+              <div class="pf-v6-c-card__body">
+                <div class="chart-empty" id="chart-placeholder">
+                  Collecting data<span class="dot-pulse"></span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right: Sidebar -->
+        <div class="dashboard-sidebar pf-v6-u-p-lg" id="sidebar">
+          <div class="pf-v6-l-stack pf-m-gutter">
+
+            <!-- Total Spend -->
+            <div class="pf-v6-l-stack__item">
+              <div class="pf-v6-c-card">
+                <div class="pf-v6-c-card__header">
+                  <div class="pf-v6-c-card__title">
+                    <h3 class="pf-v6-c-title pf-m-md">Total Spend</h3>
+                  </div>
+                </div>
+                <div class="pf-v6-c-card__body">
+                  <div class="stat-big-num" id="stat-spend">--</div>
+                  <div class="spark-wrap"><canvas id="sparkSpend"></canvas></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Total Tokens -->
+            <div class="pf-v6-l-stack__item">
+              <div class="pf-v6-c-card">
+                <div class="pf-v6-c-card__header">
+                  <div class="pf-v6-c-card__title">
+                    <h3 class="pf-v6-c-title pf-m-md">Total Tokens</h3>
+                  </div>
+                </div>
+                <div class="pf-v6-c-card__body">
+                  <div class="stat-big-num" id="stat-tokens">--</div>
+                  <div class="spark-wrap"><canvas id="sparkTokens"></canvas></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Active Users -->
+            <div class="pf-v6-l-stack__item">
+              <div class="pf-v6-c-card">
+                <div class="pf-v6-c-card__header">
+                  <div class="pf-v6-c-card__title">
+                    <h3 class="pf-v6-c-title pf-m-md">Active Users</h3>
+                  </div>
+                </div>
+                <div class="pf-v6-c-card__body">
+                  <div class="stat-big-num" id="stat-users">--</div>
+                  <div class="spark-wrap"><canvas id="sparkUsers"></canvas></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- KV Cache Hit Rate -->
+            <div class="pf-v6-l-stack__item">
+              <div class="pf-v6-c-card">
+                <div class="pf-v6-c-card__header">
+                  <div class="pf-v6-c-card__title">
+                    <h3 class="pf-v6-c-title pf-m-md">KV Cache Hit Rate</h3>
+                  </div>
+                </div>
+                <div class="pf-v6-c-card__body">
+                  <div class="stat-big-num" id="stat-cache">--</div>
+                  <div class="spark-wrap"><canvas id="sparkCache"></canvas></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Per-model Cost Intelligence (dynamically populated) -->
+            <div class="pf-v6-l-stack__item" id="cost-intel-container">
+              <!-- JS will create one card per model -->
+            </div>
+
+            <!-- Per-user spend -->
+            <div class="pf-v6-l-stack__item">
+              <div class="pf-v6-c-card">
+                <div class="pf-v6-c-card__header">
+                  <div class="pf-v6-c-card__title">
+                    <h3 class="pf-v6-c-title pf-m-md">Per-User Spend</h3>
+                  </div>
+                </div>
+                <div class="pf-v6-c-card__body" id="spend-list">
+                  <div class="pf-v6-c-content"><p>Loading...</p></div>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
+        <!-- vLLM Performance panel (full width, between sidebar/chart and table) -->
+        <div class="table-panel pf-v6-u-p-lg" id="perf-panel">
+          <div class="pf-v6-c-card">
+            <div class="pf-v6-c-card__header">
+              <div class="pf-v6-c-card__title">
+                <h2 class="pf-v6-c-title pf-m-lg">vLLM Performance</h2>
+              </div>
+            </div>
+            <div class="pf-v6-c-card__body" id="perf-stats">
+              <!-- Populated by JS -->
+            </div>
+          </div>
+        </div>
+
+        <!-- Bottom: Data table -->
+        <div class="table-panel pf-v6-u-p-lg">
+          <div class="pf-v6-c-card">
+            <div class="pf-v6-c-card__header">
+              <div class="pf-v6-c-card__title">
+                <h2 class="pf-v6-c-title pf-m-lg">Usage Details</h2>
+              </div>
+            </div>
+            <div class="pf-v6-c-card__body">
+              <table class="pf-v6-c-table pf-m-compact pf-m-grid-md" role="grid">
+                <thead class="pf-v6-c-table__thead">
+                  <tr class="pf-v6-c-table__tr" role="row">
+                    <th class="pf-v6-c-table__th" role="columnheader" scope="col">User</th>
+                    <th class="pf-v6-c-table__th" role="columnheader" scope="col">Model</th>
+                    <th class="pf-v6-c-table__th" role="columnheader" scope="col">Tokens Used</th>
+                    <th class="pf-v6-c-table__th" role="columnheader" scope="col">Limit</th>
+                    <th class="pf-v6-c-table__th" role="columnheader" scope="col">Usage</th>
+                    <th class="pf-v6-c-table__th" role="columnheader" scope="col">%</th>
+                    <th class="pf-v6-c-table__th" role="columnheader" scope="col">Cost (USD)</th>
+                    <th class="pf-v6-c-table__th" role="columnheader" scope="col">Cost Center</th>
+                    <th class="pf-v6-c-table__th" role="columnheader" scope="col">Window Resets</th>
+                  </tr>
+                </thead>
+                <tbody class="pf-v6-c-table__tbody" id="table-body" role="rowgroup">
+                  <tr class="pf-v6-c-table__tr" role="row">
+                    <td class="pf-v6-c-table__td" role="cell" colspan="9" style="text-align:center;padding:48px 16px;">
+                      Loading usage data...
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+      </div>
+</div>
+
+<script>
+(function() {
+  "use strict";
+
+  // -- State --
+  var modelCharts = {}; // keyed by model name, each { chart, datasetCount }
+  var sparkCharts = {};
+  var lastFetchTime = null;
+  var updateTimer = null;
+  var hasVllmData = false;
+
+  // Sparkline history buffers (for when /history is unavailable)
+  var localHistory = { spend: [], tokens: [], users: [], cacheHit: [], labels: [] };
+  var MAX_LOCAL_POINTS = 60;
+
+  // -- Helpers --
+  function fmt(n) { return n.toLocaleString("en-US"); }
+  function fmtUsd(n) { return "$" + n.toFixed(4); }
+
+  function colorForPct(pct) {
+    if (pct >= 80) return "r";
+    if (pct >= 50) return "y";
+    return "g";
+  }
+
+  function pfLabelClass(c) {
+    if (c === "r") return "pf-m-red";
+    if (c === "y") return "pf-m-gold";
+    return "pf-m-green";
+  }
+
+  function pfProgressClass(c) {
+    if (c === "r") return "pf-m-danger";
+    if (c === "y") return "pf-m-warning";
+    return "pf-m-success";
+  }
+
+  function timeLabel(ts) {
+    try {
+      var d = new Date(ts);
+      return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    } catch(e) { return ts; }
+  }
+
+  function relativeTime(date) {
+    var s = Math.floor((Date.now() - date.getTime()) / 1000);
+    if (s < 5) return "just now";
+    if (s < 60) return s + "s ago";
+    var m = Math.floor(s / 60);
+    return m + "m " + (s % 60) + "s ago";
+  }
+
+  // -- Fetch data --
+  function fetchJson(url) {
+    return fetch(url).then(function(r) {
+      if (!r.ok) return null;
+      return r.json();
+    }).catch(function() { return null; });
+  }
+
+  function loadData() {
+    return Promise.all([
+      fetchJson("/api/v1/usage"),
+      fetchJson("/api/v1/usage/history"),
+    ]).then(function(results) {
+      var current = results[0];
+      var history = results[1];
+      lastFetchTime = new Date();
+      if (current) render(current, history);
+      startUpdateTimer();
+    });
+  }
+
+  // -- Update-ago ticker --
+  function startUpdateTimer() {
+    if (updateTimer) clearInterval(updateTimer);
+    updateTimer = setInterval(function() {
+      if (!lastFetchTime) return;
+      var el = document.getElementById("chip-updated");
+      el.innerHTML =
+        '<span class="pf-v6-c-label__content"><span class="pf-v6-c-label__text">'
+        + "Updated " + relativeTime(lastFetchTime)
+        + '</span></span>';
+    }, 1000);
+  }
+
+  // -- Commercial API pricing (per 1M tokens, published June 2026) --
+  var API_PRICING = [
+    { provider: "OpenAI",    model: "GPT-4.1",           input: 2.00,  output: 8.00 },
+    { provider: "OpenAI",    model: "GPT-4.1 mini",      input: 0.40,  output: 1.60 },
+    { provider: "OpenAI",    model: "GPT-4.1 nano",      input: 0.10,  output: 0.40 },
+    { provider: "OpenAI",    model: "GPT-5.5",           input: 5.00,  output: 30.00 },
+    { provider: "OpenAI",    model: "o3 (reasoning)",     input: 2.00,  output: 8.00 },
+    { provider: "OpenAI",    model: "o4-mini (reasoning)", input: 1.10, output: 4.40 },
+    { provider: "Anthropic", model: "Claude Sonnet 4.6",  input: 3.00,  output: 15.00 },
+    { provider: "Anthropic", model: "Claude Opus 4.8",    input: 5.00,  output: 25.00 },
+    { provider: "Anthropic", model: "Claude Haiku 4.5",   input: 1.00,  output: 5.00 },
+  ];
+  var selectedPricingIdx = 0;
+
+  // -- Per-model Cost Intelligence cards in sidebar --
+  function renderCostIntelligence(vllm, currentData) {
+    var container = document.getElementById("cost-intel-container");
+    var perModel = (currentData || {}).vllm_metrics_by_model || {};
+    var models = Object.keys(perModel);
+    if (models.length === 0 && vllm && vllm.prompt_tokens_total) {
+      models = ["all"];
+      perModel = { "all": vllm };
+    }
+    if (models.length === 0) {
+      container.innerHTML = '<div class="pf-v6-c-card"><div class="pf-v6-c-card__body"><div class="pf-v6-c-content"><p>Waiting for data...</p></div></div></div>';
+      return;
+    }
+
+    // Shared model selector options
+    var opts = "";
+    for (var i = 0; i < API_PRICING.length; i++) {
+      var m = API_PRICING[i];
+      opts += '<option value="' + i + '"' + (i === selectedPricingIdx ? ' selected' : '') + '>'
+        + m.provider + ' ' + m.model + '</option>';
+    }
+
+    var html = '';
+    models.forEach(function(model) {
+      var mv = perModel[model] || {};
+      if (!mv.prompt_tokens_total) return;
+
+      var uncached = mv.prompt_tokens_total - (mv.cached_tokens_total || 0);
+      var total = mv.prompt_tokens_total + mv.generation_tokens_total;
+      var uncachedPct = total > 0 ? (uncached / total * 100) : 0;
+      var cachedPct = total > 0 ? ((mv.cached_tokens_total || 0) / total * 100) : 0;
+      var genPct = total > 0 ? (mv.generation_tokens_total / total * 100) : 0;
+
+      var cacheSavings = (mv.cache_savings_usd != null) ? mv.cache_savings_usd : 0;
+      var selfHosted = (mv.self_hosted_usd != null) ? mv.self_hosted_usd : 0;
+
+      var p = API_PRICING[selectedPricingIdx];
+      var inputM = mv.prompt_tokens_total / 1000000;
+      var outputM = mv.generation_tokens_total / 1000000;
+      var apiCost = (inputM * p.input) + (outputM * p.output);
+      var ratio = selfHosted > 0 ? apiCost / selfHosted : 0;
+      var savingsLabel, savingsClass;
+      if (ratio >= 1.5) { savingsLabel = Math.round(ratio) + "x savings"; savingsClass = "pf-m-green"; }
+      else if (ratio >= 0.8) { savingsLabel = "~same"; savingsClass = "pf-m-gold"; }
+      else if (selfHosted > 0) { savingsLabel = (1/ratio).toFixed(1) + "x at load"; savingsClass = "pf-m-cyan"; }
+      else { savingsLabel = "--"; savingsClass = "pf-m-cyan"; }
+
+      html += '<div class="pf-v6-c-card pf-v6-u-mb-md">'
+        + '<div class="pf-v6-c-card__header"><div class="pf-v6-c-card__title">'
+        + '<h3 class="pf-v6-c-title pf-m-md">' + model + '</h3></div></div>'
+        + '<div class="pf-v6-c-card__body" style="font-size:12px">'
+        + '<div style="display:flex;height:10px;border-radius:4px;overflow:hidden;margin-bottom:8px">'
+        + '<div style="width:' + uncachedPct + '%;background:#58a6ff"></div>'
+        + '<div style="width:' + cachedPct + '%;background:#39d353"></div>'
+        + '<div style="width:' + genPct + '%;background:#7c3aed"></div>'
+        + '</div>'
+        + '<div style="line-height:1.6;margin-bottom:6px">'
+        + '<span style="color:#58a6ff">&#9632;</span> ' + fmt(uncached) + ' in '
+        + '<span style="color:#39d353">&#9632;</span> ' + fmt(mv.cached_tokens_total || 0) + ' cached '
+        + '<span style="color:#7c3aed">&#9632;</span> ' + fmt(mv.generation_tokens_total) + ' out'
+        + '</div>'
+        + '<div style="color:#39d353;font-weight:600">Cache saved $' + cacheSavings.toFixed(4) + '</div>'
+        + '<div>Self-hosted: <span class="mono">$' + selfHosted.toFixed(4) + '</span>'
+        + ' <button type="button" onclick="showSelfHostedBasis()" class="pf-v6-c-button pf-m-plain pf-m-small"'
+        + ' style="font-size:12px;padding:0 2px">&#9432;</button></div>'
+        + '<div>API equiv: <span class="mono">$' + apiCost.toFixed(4) + '</span>'
+        + ' <span class="pf-v6-c-label ' + savingsClass + '" style="font-size:10px"><span class="pf-v6-c-label__content"><span class="pf-v6-c-label__text">' + savingsLabel + '</span></span></span></div>'
+        + '</div></div>';
+    });
+
+    // Add shared model selector at the bottom
+    html += '<div class="pf-v6-c-card"><div class="pf-v6-c-card__body" style="padding:12px 16px">'
+      + '<div style="font-size:12px;margin-bottom:4px;color:var(--pf-t--global--text--color--subtle)">Compare against:</div>'
+      + '<select id="pricing-select" onchange="onPricingChange(this.value)"'
+      + ' style="background:var(--pf-t--global--background--color--secondary--default);'
+      + ' color:var(--pf-t--global--text--color--regular);border:1px solid var(--pf-t--global--border--color--default);'
+      + ' border-radius:4px;padding:4px 8px;font-size:12px;width:100%">'
+      + opts + '</select>'
+      + '<div style="font-size:10px;color:var(--pf-t--global--text--color--subtle);margin-top:6px;line-height:1.3">'
+      + 'API rates from provider pricing pages (Jun 2026). Not a quote.'
+      + '</div></div></div>';
+
+    container.innerHTML = html;
+  }
+
+  var _lastVllm = null;
+  var _lastCurrent = null;
+  window.onPricingChange = function(idx) {
+    selectedPricingIdx = parseInt(idx);
+    if (_lastVllm) renderCostIntelligence(_lastVllm, _lastCurrent);
+    // Also re-render model chart cost lines
+    if (_lastCurrent && _lastCurrent.vllm_metrics_by_model) {
+      var container = document.getElementById("model-charts");
+      Object.keys(_lastCurrent.vllm_metrics_by_model).forEach(function(model) {
+        var cardId = "model-card-" + model.replace(/[^a-zA-Z0-9_-]/g, "_");
+        var costEl = document.getElementById(cardId + "-cost");
+        if (costEl) {
+          var mv = _lastCurrent.vllm_metrics_by_model[model] || {};
+          var selfCost = (mv.self_hosted_usd != null) ? mv.self_hosted_usd : 0;
+          var p = API_PRICING[selectedPricingIdx];
+          var apiCost = (mv.prompt_tokens_total || 0) / 1e6 * p.input + (mv.generation_tokens_total || 0) / 1e6 * p.output;
+          var ratio = selfCost > 0 ? apiCost / selfCost : 0;
+          var cl, cc;
+          if (ratio >= 1.5) { cl = Math.round(ratio) + "x savings"; cc = "pf-m-green"; }
+          else if (ratio >= 0.8) { cl = "~same"; cc = "pf-m-gold"; }
+          else if (selfCost > 0) { cl = (1/ratio).toFixed(1) + "x at load"; cc = "pf-m-cyan"; }
+          else { cl = "--"; cc = "pf-m-cyan"; }
+          costEl.innerHTML = 'Self-hosted: <span class="mono">$' + selfCost.toFixed(4) + '</span>'
+            + ' | ' + p.provider + ' ' + p.model + ': <span class="mono">$' + apiCost.toFixed(4) + '</span>'
+            + ' <span class="pf-v6-c-label ' + cc + '" style="font-size:10px"><span class="pf-v6-c-label__content"><span class="pf-v6-c-label__text">' + cl + '</span></span></span>';
+        }
+      });
+    }
+  };
+
+  // -- vLLM Performance stats --
+  function renderPerfStats(vllm) {
+    var el = document.getElementById("perf-stats");
+    if (!vllm) { el.innerHTML = ''; return; }
+
+    var ttftP50 = (vllm.ttft_p50_ms != null) ? vllm.ttft_p50_ms + "ms" : "--";
+    var ttftP95 = (vllm.ttft_p95_ms != null) ? vllm.ttft_p95_ms + "ms" : "--";
+    var tpot = (vllm.tpot_p50_ms != null) ? vllm.tpot_p50_ms + "ms" : "--";
+    var prefill = (vllm.prefill_time_p50_ms != null) ? vllm.prefill_time_p50_ms + "ms" : "--";
+    var decode = (vllm.decode_time_p50_ms != null) ? (vllm.decode_time_p50_ms / 1000).toFixed(1) + "s" : "--";
+    var kvCache = (vllm.kv_cache_usage_pct != null) ? vllm.kv_cache_usage_pct + "%" : "--";
+    var running = (vllm.requests_running != null) ? String(vllm.requests_running) : "--";
+    var queued = (vllm.requests_waiting != null) ? String(vllm.requests_waiting) : "--";
+
+    var stats = [
+      { value: ttftP50, label: "TTFT P50" },
+      { value: ttftP95, label: "TTFT P95" },
+      { value: tpot, label: "Token Latency" },
+      { value: prefill, label: "Prefill P50" },
+      { value: decode, label: "Decode P50" },
+      { value: kvCache, label: "GPU KV Cache" },
+      { value: running, label: "Running" },
+      { value: queued, label: "Queued" },
+    ];
+
+    el.innerHTML = '<div class="perf-grid">'
+      + stats.map(function(s) {
+          return '<div class="perf-stat">'
+            + '<div class="perf-value">' + s.value + '</div>'
+            + '<div class="perf-label">' + s.label + '</div>'
+            + '</div>';
+        }).join('')
+      + '</div>';
+  }
+
+  // -- Render everything --
+  function render(current, history) {
+    var usage = current.usage || [];
+    var vllm = current.vllm_metrics || null;
+
+    // Track whether we have vLLM data for chart fallback
+    hasVllmData = !!(vllm && vllm.prompt_tokens_total);
+
+    // Header chips
+    var models = [];
+    var seen = {};
+    usage.forEach(function(u) {
+      if (!seen[u.model]) { seen[u.model] = true; models.push(u.model); }
+    });
+    var modelText = models.length
+      ? models.map(function(m) { return "Model: " + m; }).join(" / ")
+      : "Model --";
+    document.getElementById("chip-model").innerHTML =
+      '<span class="pf-v6-c-label__content"><span class="pf-v6-c-label__text">'
+      + modelText + '</span></span>';
+    document.getElementById("chip-instance").innerHTML =
+      '<span class="pf-v6-c-label__content"><span class="pf-v6-c-label__text">'
+      + "Instance: " + current.instance_type + " &middot; $"
+      + Number(current.gpu_cost_per_hour).toFixed(2) + "/hr"
+      + '</span></span>';
+    document.getElementById("chip-updated").innerHTML =
+      '<span class="pf-v6-c-label__content"><span class="pf-v6-c-label__text">'
+      + "Updated just now" + '</span></span>';
+
+    // Aggregate current numbers
+    var totalSpend = usage.reduce(function(s, u) { return s + u.cost_usd; }, 0);
+    var totalTokens = usage.reduce(function(s, u) { return s + u.tokens_used; }, 0);
+    var activeSet = {};
+    usage.forEach(function(u) { if (u.tokens_used > 0) activeSet[u.userid] = true; });
+    var activeUsers = Object.keys(activeSet).length;
+
+    // Stat cards
+    document.getElementById("stat-spend").textContent = "$" + totalSpend.toFixed(4);
+    document.getElementById("stat-tokens").textContent = fmt(totalTokens);
+    document.getElementById("stat-users").textContent = String(activeUsers);
+
+    // KV Cache Hit Rate stat card
+    if (vllm && vllm.cache_hit_rate_pct != null) {
+      document.getElementById("stat-cache").textContent = vllm.cache_hit_rate_pct + "%";
+    } else {
+      document.getElementById("stat-cache").textContent = "--";
+    }
+
+    // Cost Intelligence card (replaces Token Breakdown)
+    _lastVllm = vllm;
+    _lastCurrent = current;
+    renderCostIntelligence(vllm, current);
+
+    // vLLM Performance panel
+    renderPerfStats(vllm);
+
+    // Build time-series data from history or local buffer
+    var timeSeries;
+    var snapshots = null;
+    if (history && history.snapshots && history.snapshots.length > 1) {
+      snapshots = history.snapshots;
+      timeSeries = snapshots.map(function(snap) {
+        var su = snap.usage || [];
+        var snapVllm = snap.vllm_metrics || null;
+        return {
+          label: timeLabel(snap.timestamp),
+          spend: su.reduce(function(s, u) { return s + u.cost_usd; }, 0),
+          tokens: su.reduce(function(s, u) { return s + u.tokens_used; }, 0),
+          users: (function() {
+            var s = {};
+            su.forEach(function(u) { if (u.tokens_used > 0) s[u.userid] = true; });
+            return Object.keys(s).length;
+          })(),
+          cacheHit: snapVllm ? snapVllm.cache_hit_rate_pct : null,
+          promptPct: snapVllm ? snapVllm.prompt_pct : null,
+          generationPct: snapVllm ? snapVllm.generation_pct : null,
+          vllm_metrics: snapVllm,
+          vllm_metrics_by_model: snap.vllm_metrics_by_model || null,
+        };
+      });
+    } else {
+      // Append to local buffer
+      localHistory.labels.push(timeLabel(current.timestamp));
+      localHistory.spend.push(totalSpend);
+      localHistory.tokens.push(totalTokens);
+      localHistory.users.push(activeUsers);
+      localHistory.cacheHit.push(vllm ? vllm.cache_hit_rate_pct : null);
+      if (localHistory.labels.length > MAX_LOCAL_POINTS) {
+        localHistory.labels.shift();
+        localHistory.spend.shift();
+        localHistory.tokens.shift();
+        localHistory.users.shift();
+        localHistory.cacheHit.shift();
+      }
+      timeSeries = localHistory.labels.map(function(lb, i) {
+        return {
+          label: lb,
+          spend: localHistory.spend[i],
+          tokens: localHistory.tokens[i],
+          users: localHistory.users[i],
+          cacheHit: localHistory.cacheHit[i],
+          promptPct: vllm ? vllm.prompt_pct : null,
+          generationPct: vllm ? vllm.generation_pct : null,
+          vllm_metrics: null,
+          vllm_metrics_by_model: null,
+        };
+      });
+    }
+
+    // Render per-model charts
+    var perModelData = current.vllm_metrics_by_model || null;
+    renderModelCharts(perModelData, snapshots, timeSeries, current);
+
+    renderSparkline("sparkSpend",  timeSeries.map(function(d) { return d.spend; }),  "#e3a008");
+    renderSparkline("sparkTokens", timeSeries.map(function(d) { return d.tokens; }), "#58a6ff");
+    renderSparkline("sparkUsers",  timeSeries.map(function(d) { return d.users; }),  "#3fb950");
+
+    // Cache hit rate sparkline -- filter out nulls for a clean line
+    var cacheHitSeries = timeSeries.map(function(d) { return d.cacheHit; });
+    var hasCacheData = cacheHitSeries.some(function(v) { return v != null; });
+    if (hasCacheData) {
+      renderSparkline("sparkCache", cacheHitSeries.map(function(v) { return v != null ? v : 0; }), "#39d353");
+    }
+
+    renderSpendBars(usage);
+    renderTable(usage);
+  }
+
+  // -- Per-model charts (stacked bar with cache hit rate overlay) --
+  var MAX_CHART_POINTS = 30; // ~15 minutes at 30s intervals
+
+  function renderModelCharts(perModelData, snapshots, timeSeries, current) {
+    var container = document.getElementById("model-charts");
+    var placeholder = document.getElementById("chart-placeholder-card");
+
+    // Determine model list: prefer per-model vLLM data, fall back to usage models
+    var modelNames = [];
+    if (perModelData) {
+      modelNames = Object.keys(perModelData);
+    }
+    if (modelNames.length === 0) {
+      // Fall back to distinct models from usage array
+      var seen = {};
+      (current.usage || []).forEach(function(u) {
+        if (!seen[u.model]) { seen[u.model] = true; modelNames.push(u.model); }
+      });
+    }
+
+    // If no data yet or fewer than 2 time points, show placeholder
+    if (modelNames.length === 0 || timeSeries.length < 2) {
+      if (placeholder) placeholder.style.display = "";
+      return;
+    }
+    if (placeholder) placeholder.style.display = "none";
+
+    // Track which model cards exist so we can remove stale ones
+    var activeIds = {};
+
+    modelNames.forEach(function(model) {
+      var cardId = "model-card-" + model.replace(/[^a-zA-Z0-9_-]/g, "_");
+      var canvasId = "heroChart-" + model.replace(/[^a-zA-Z0-9_-]/g, "_");
+      activeIds[cardId] = true;
+
+      // Get current model metrics
+      var mv = (perModelData && perModelData[model]) ? perModelData[model] : {};
+      var cacheRate = (mv.cache_hit_rate_pct != null) ? mv.cache_hit_rate_pct + "%" : "--";
+      var ttft = (mv.ttft_p50_ms != null) ? mv.ttft_p50_ms + "ms" : "--";
+      var promptTok = (mv.prompt_tokens_total != null) ? fmt(mv.prompt_tokens_total) : "--";
+      var genTok = (mv.generation_tokens_total != null) ? fmt(mv.generation_tokens_total) : "--";
+      var summaryLine = "Cache: " + cacheRate + " | TTFT: " + ttft
+        + " | " + promptTok + " in / " + genTok + " out";
+
+      // Compute inline cost comparison for this model
+      var selfCost = (mv.self_hosted_usd != null) ? mv.self_hosted_usd : 0;
+      var p = API_PRICING[selectedPricingIdx];
+      var mInputM = (mv.prompt_tokens_total || 0) / 1000000;
+      var mOutputM = (mv.generation_tokens_total || 0) / 1000000;
+      var apiCost = (mInputM * p.input) + (mOutputM * p.output);
+      var ratio = selfCost > 0 ? apiCost / selfCost : 0;
+      var costLabel, costClass;
+      if (ratio >= 1.5) { costLabel = Math.round(ratio) + "x savings"; costClass = "pf-m-green"; }
+      else if (ratio >= 0.8) { costLabel = "~same"; costClass = "pf-m-gold"; }
+      else if (selfCost > 0) { costLabel = (1/ratio).toFixed(1) + "x at load"; costClass = "pf-m-cyan"; }
+      else { costLabel = "--"; costClass = "pf-m-cyan"; }
+      var costLine = 'Self-hosted: <span class="mono">$' + selfCost.toFixed(4) + '</span>'
+        + ' | ' + p.provider + ' ' + p.model + ': <span class="mono">$' + apiCost.toFixed(4) + '</span>'
+        + ' <span class="pf-v6-c-label ' + costClass + '" style="font-size:10px"><span class="pf-v6-c-label__content"><span class="pf-v6-c-label__text">' + costLabel + '</span></span></span>';
+
+      // Create or update card DOM
+      var card = document.getElementById(cardId);
+      if (!card) {
+        card = document.createElement("div");
+        card.className = "pf-v6-c-card";
+        card.id = cardId;
+        card.innerHTML =
+          '<div class="pf-v6-c-card__header">'
+          + '<div class="pf-v6-c-card__title">'
+          + '  <h2 class="pf-v6-c-title pf-m-md" id="' + cardId + '-title"></h2>'
+          + '</div>'
+          + '<div style="margin-left:auto;font-size:12px;color:var(--pf-t--global--text--color--subtle)"'
+          + '  id="' + cardId + '-summary"></div>'
+          + '</div>'
+          + '<div class="pf-v6-c-card__body" style="padding:12px 16px">'
+          + '  <div style="position:relative;height:180px">'
+          + '    <canvas id="' + canvasId + '"></canvas>'
+          + '  </div>'
+          + '  <div style="font-size:11px;margin-top:8px;line-height:1.6" id="' + cardId + '-cost"></div>'
+          + '</div>';
+        container.appendChild(card);
+      }
+      document.getElementById(cardId + "-title").textContent = model;
+      document.getElementById(cardId + "-summary").textContent = summaryLine;
+      document.getElementById(cardId + "-cost").innerHTML = costLine;
+
+      // Build per-model time series from snapshots
+      var modelSeries = buildModelTimeSeries(model, snapshots, timeSeries);
+
+      // Render chart for this model
+      renderSingleModelChart(canvasId, model, modelSeries);
+    });
+
+    // Remove cards for models that no longer exist
+    var allCards = container.querySelectorAll(".pf-v6-c-card");
+    for (var c = 0; c < allCards.length; c++) {
+      var cid = allCards[c].id;
+      if (cid && cid !== "chart-placeholder-card" && !activeIds[cid]) {
+        if (modelCharts[cid]) {
+          modelCharts[cid].chart.destroy();
+          delete modelCharts[cid];
+        }
+        allCards[c].remove();
+      }
+    }
+  }
+
+  // Build per-model time-series: delta of prompt/generation tokens and cache hit rate
+  function buildModelTimeSeries(model, snapshots, timeSeries) {
+    var result = [];
+
+    if (snapshots && snapshots.length > 1) {
+      for (var i = 0; i < snapshots.length; i++) {
+        var snap = snapshots[i];
+        var byModel = snap.vllm_metrics_by_model || {};
+        var mv = byModel[model] || null;
+        var label = timeLabel(snap.timestamp);
+
+        if (i === 0) {
+          // First snapshot: no delta, just record for next iteration
+          result.push({
+            label: label,
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheRate: null,
+          });
+          continue;
+        }
+
+        var prevSnap = snapshots[i - 1];
+        var prevByModel = prevSnap.vllm_metrics_by_model || {};
+        var prevMv = prevByModel[model] || {};
+
+        var currPrompt = mv ? (mv.prompt_tokens_total || 0) : 0;
+        var prevPrompt = prevMv.prompt_tokens_total || 0;
+        var deltaPrompt = Math.max(0, currPrompt - prevPrompt);
+
+        var currGen = mv ? (mv.generation_tokens_total || 0) : 0;
+        var prevGen = prevMv.generation_tokens_total || 0;
+        var deltaGen = Math.max(0, currGen - prevGen);
+
+        // Cache hit rate from deltas
+        var currHits = mv ? (mv.prefix_cache_hits_total || 0) : 0;
+        var prevHits = prevMv.prefix_cache_hits_total || 0;
+        var currQueries = mv ? (mv.prefix_cache_queries_total || 0) : 0;
+        var prevQueries = prevMv.prefix_cache_queries_total || 0;
+        var deltaHits = currHits - prevHits;
+        var deltaQueries = currQueries - prevQueries;
+        var cacheRate = (deltaQueries > 0) ? (deltaHits / deltaQueries * 100) : null;
+
+        result.push({
+          label: label,
+          inputTokens: deltaPrompt,
+          outputTokens: deltaGen,
+          cacheRate: cacheRate,
+        });
+      }
+    } else {
+      // Local history fallback: no per-model breakdown available,
+      // use aggregate proportions as rough estimate
+      for (var j = 0; j < timeSeries.length; j++) {
+        var ts = timeSeries[j];
+        var inputT = 0;
+        var outputT = 0;
+        if (ts.promptPct != null && ts.generationPct != null) {
+          inputT = Math.round(ts.tokens * (ts.promptPct / 100));
+          outputT = Math.round(ts.tokens * (ts.generationPct / 100));
+        } else {
+          inputT = ts.tokens;
+        }
+        result.push({
+          label: ts.label,
+          inputTokens: inputT,
+          outputTokens: outputT,
+          cacheRate: ts.cacheHit,
+        });
+      }
+    }
+
+    return result;
+  }
+
+  // Render a single model's stacked bar chart with cache hit rate line
+  function renderSingleModelChart(canvasId, model, series) {
+    // Trim to MAX_CHART_POINTS
+    if (series.length > MAX_CHART_POINTS) {
+      series = series.slice(-MAX_CHART_POINTS);
+    }
+
+    if (series.length < 2) return;
+
+    var labels = series.map(function(d) { return d.label; });
+    var inputData = series.map(function(d) { return d.inputTokens; });
+    var outputData = series.map(function(d) { return d.outputTokens; });
+    var cacheRates = series.map(function(d) { return d.cacheRate; });
+
+    var hasCacheRates = cacheRates.some(function(v) { return v != null; });
+    var hasInput = inputData.some(function(v) { return v > 0; });
+    var hasOutput = outputData.some(function(v) { return v > 0; });
+    var isStacked = hasInput || hasOutput;
+
+    var desiredDatasetCount = isStacked ? 2 : 1;
+    if (hasCacheRates) desiredDatasetCount += 1;
+
+    var entry = modelCharts[canvasId] || null;
+
+    // Rebuild chart if dataset count changed
+    if (entry && entry.datasetCount !== desiredDatasetCount) {
+      entry.chart.destroy();
+      entry = null;
+      modelCharts[canvasId] = null;
+    }
+
+    // Update existing chart
+    if (entry) {
+      entry.chart.data.labels = labels;
+      if (isStacked) {
+        entry.chart.data.datasets[0].data = inputData;
+        entry.chart.data.datasets[1].data = outputData;
+        if (hasCacheRates && entry.chart.data.datasets.length >= 3) {
+          entry.chart.data.datasets[2].data = cacheRates;
+        }
+      } else {
+        entry.chart.data.datasets[0].data = inputData.map(function(v, i) { return v + outputData[i]; });
+        if (hasCacheRates && entry.chart.data.datasets.length >= 2) {
+          entry.chart.data.datasets[1].data = cacheRates;
+        }
+      }
+      entry.chart.update("none");
+      return;
+    }
+
+    // Build datasets
+    var datasets;
+    if (isStacked) {
+      datasets = [
+        {
+          label: "Input",
+          data: inputData,
+          backgroundColor: "#58a6ff",
+          borderRadius: 3,
+          maxBarThickness: 32,
+          order: 2,
+        },
+        {
+          label: "Output",
+          data: outputData,
+          backgroundColor: "#7c3aed",
+          borderRadius: { topLeft: 3, topRight: 3 },
+          maxBarThickness: 32,
+          order: 1,
+        },
+      ];
+    } else {
+      datasets = [
+        {
+          label: "Tokens",
+          data: inputData.map(function(v, i) { return v + outputData[i]; }),
+          backgroundColor: "#7c3aed",
+          borderRadius: 3,
+          maxBarThickness: 32,
+          order: 1,
+        },
+      ];
+    }
+
+    if (hasCacheRates) {
+      datasets.push({
+        label: "Cache Hit %",
+        data: cacheRates,
+        type: "line",
+        borderColor: "#39d353",
+        borderWidth: 2,
+        pointRadius: 2,
+        pointBackgroundColor: "#39d353",
+        yAxisID: "y1",
+        tension: 0.3,
+        spanGaps: true,
+        order: 0,
+      });
+    }
+
+    var scales = {
+      x: {
+        stacked: isStacked,
+        grid: { color: "rgba(33,38,45,.5)", drawBorder: false },
+        ticks: { color: "#8b949e", font: { size: 10 }, maxRotation: 0 },
+      },
+      y: {
+        stacked: isStacked,
+        grid: { color: "rgba(33,38,45,.5)", drawBorder: false },
+        ticks: {
+          color: "#8b949e",
+          font: { size: 10, family: "'SF Mono',Consolas,monospace" },
+          callback: function(v) { return fmt(v); },
+        },
+        beginAtZero: true,
+      },
+    };
+
+    if (hasCacheRates) {
+      scales.y1 = {
+        position: "right",
+        min: 0, max: 100,
+        grid: { drawOnChartArea: false },
+        ticks: { color: "#39d353", font: { size: 10 }, callback: function(v) { return v + "%"; } },
+        title: { display: false },
+      };
+    }
+
+    var canvas = document.getElementById(canvasId);
+    if (!canvas) return;
+    var ctx = canvas.getContext("2d");
+
+    var chart = new Chart(ctx, {
+      type: "bar",
+      data: { labels: labels, datasets: datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: {
+            display: true,
+            labels: { color: "#8b949e", font: { size: 11 }, boxWidth: 12 },
+          },
+          tooltip: {
+            backgroundColor: "#161b22",
+            borderColor: "#30363d",
+            borderWidth: 1,
+            titleColor: "#e1e4e8",
+            bodyColor: "#e1e4e8",
+            bodyFont: { family: "'SF Mono',Consolas,monospace", size: 12 },
+            padding: 8,
+            callbacks: {
+              label: function(ctx) {
+                if (ctx.dataset.yAxisID === "y1") {
+                  return ctx.dataset.label + ": " + (ctx.parsed.y != null ? ctx.parsed.y.toFixed(1) + "%" : "--");
+                }
+                return ctx.dataset.label + ": " + fmt(ctx.parsed.y) + " tokens";
+              },
+            },
+          },
+        },
+        scales: scales,
+      },
+    });
+
+    modelCharts[canvasId] = { chart: chart, datasetCount: desiredDatasetCount };
+  }
+
+  // -- Sparklines --
+  function renderSparkline(canvasId, values, color) {
+    var canvas = document.getElementById(canvasId);
+    if (!canvas) return;
+
+    if (values.length < 2) {
+      if (sparkCharts[canvasId]) {
+        sparkCharts[canvasId].destroy();
+        delete sparkCharts[canvasId];
+      }
+      return;
+    }
+
+    var labels = values.map(function(_, i) { return i; });
+    var dataset = {
+      data: values,
+      borderColor: color,
+      borderWidth: 2,
+      pointRadius: 0,
+      tension: 0.3,
+      fill: {
+        target: "origin",
+        above: color + "18",
+      },
+    };
+
+    if (sparkCharts[canvasId]) {
+      sparkCharts[canvasId].data.labels = labels;
+      sparkCharts[canvasId].data.datasets[0] = dataset;
+      sparkCharts[canvasId].update("none");
+      return;
+    }
+
+    var ctx = canvas.getContext("2d");
+    sparkCharts[canvasId] = new Chart(ctx, {
+      type: "line",
+      data: { labels: labels, datasets: [dataset] },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false }, tooltip: { enabled: false } },
+        scales: {
+          x: { display: false },
+          y: { display: false },
+        },
+        elements: { line: { borderJoinStyle: "round" } },
+        animation: false,
+      },
+    });
+  }
+
+  // -- Per-user spend bars --
+  function renderSpendBars(usage) {
+    var container = document.getElementById("spend-list");
+    if (!usage.length) {
+      container.innerHTML =
+        '<div class="pf-v6-c-content"><p>No usage data</p></div>';
+      return;
+    }
+
+    // Aggregate by user (a user may have multiple model entries)
+    var byUser = {};
+    usage.forEach(function(u) {
+      if (!byUser[u.userid]) {
+        byUser[u.userid] = { cost: 0, limitCost: 0, hasCost: false };
+      }
+      byUser[u.userid].cost += u.cost_usd;
+      if (u.tokens_used > 0) {
+        var costPerToken = u.cost_usd / u.tokens_used;
+        byUser[u.userid].limitCost += u.tokens_limit * costPerToken;
+        byUser[u.userid].hasCost = true;
+      }
+    });
+
+    var html = "";
+    var sorted = Object.entries(byUser).sort(function(a, b) { return b[1].cost - a[1].cost; });
+    sorted.forEach(function(entry) {
+      var uid = entry[0];
+      var data = entry[1];
+      var pct = data.hasCost && data.limitCost > 0
+        ? Math.min((data.cost / data.limitCost) * 100, 100)
+        : 0;
+      var c = colorForPct(pct);
+      var modClass = pfProgressClass(c);
+      var detail = data.hasCost
+        ? "$" + data.cost.toFixed(4) + " / $" + data.limitCost.toFixed(4)
+        : "--";
+
+      html += '<div class="pf-v6-c-progress ' + modClass + ' pf-v6-u-mb-md">'
+            + '  <div class="pf-v6-c-progress__description">' + uid + '</div>'
+            + '  <div class="pf-v6-c-progress__status">'
+            + '    <span class="pf-v6-c-progress__measure">' + detail
+            + ' &middot; ' + pct.toFixed(0) + '%</span>'
+            + '  </div>'
+            + '  <div class="pf-v6-c-progress__bar" role="progressbar"'
+            + '       aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct.toFixed(0) + '">'
+            + '    <div class="pf-v6-c-progress__indicator" style="width:' + pct.toFixed(1) + '%"></div>'
+            + '  </div>'
+            + '</div>';
+    });
+    container.innerHTML = html;
+  }
+
+  // -- Data table --
+  function renderTable(usage) {
+    var tbody = document.getElementById("table-body");
+    if (!usage.length) {
+      tbody.innerHTML =
+        '<tr class="pf-v6-c-table__tr" role="row">'
+        + '<td class="pf-v6-c-table__td" role="cell" colspan="9" style="text-align:center;padding:48px 16px;">'
+        + 'No usage data &mdash; waiting for Limitador counters</td></tr>';
+      return;
+    }
+
+    var html = "";
+    usage.forEach(function(r) {
+      var pct = r.tokens_limit ? (r.tokens_used / r.tokens_limit * 100) : 0;
+      var c = colorForPct(pct);
+      var labelClass = pfLabelClass(c);
+      var progressClass = pfProgressClass(c);
+      var mins = Math.floor(r.window_remaining_seconds / 60);
+      var secs = r.window_remaining_seconds % 60;
+
+      html += '<tr class="pf-v6-c-table__tr" role="row">'
+        + '<td class="pf-v6-c-table__td mono" role="cell" data-label="User">' + r.userid + '</td>'
+        + '<td class="pf-v6-c-table__td" role="cell" data-label="Model">' + r.model + '</td>'
+        + '<td class="pf-v6-c-table__td mono" role="cell" data-label="Tokens Used">' + fmt(r.tokens_used) + '</td>'
+        + '<td class="pf-v6-c-table__td mono" role="cell" data-label="Limit">' + fmt(r.tokens_limit) + '</td>'
+        + '<td class="pf-v6-c-table__td" role="cell" data-label="Usage">'
+        +   '<div class="pf-v6-c-progress pf-m-sm ' + progressClass + '" style="width:120px">'
+        +     '<div class="pf-v6-c-progress__bar" role="progressbar"'
+        +       ' aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + Math.min(pct, 100).toFixed(0) + '">'
+        +       '<div class="pf-v6-c-progress__indicator" style="width:' + Math.min(pct, 100).toFixed(0) + '%"></div>'
+        +     '</div>'
+        +   '</div>'
+        + '</td>'
+        + '<td class="pf-v6-c-table__td" role="cell" data-label="%">'
+        +   '<span class="pf-v6-c-label ' + labelClass + '">'
+        +     '<span class="pf-v6-c-label__content"><span class="pf-v6-c-label__text">'
+        +       pct.toFixed(0) + '%'
+        +     '</span></span>'
+        +   '</span>'
+        + '</td>'
+        + '<td class="pf-v6-c-table__td mono" role="cell" data-label="Cost (USD)">' + fmtUsd(r.cost_usd) + '</td>'
+        + '<td class="pf-v6-c-table__td" role="cell" data-label="Cost Center">' + r.cost_center + '</td>'
+        + '<td class="pf-v6-c-table__td mono" role="cell" data-label="Window Resets">'
+        + mins + 'm ' + String(secs).padStart(2, '0') + 's</td>'
+        + '</tr>';
+    });
+    tbody.innerHTML = html;
+  }
+
+  // -- Empty state --
+  // Empty state is now a non-destructive overlay — grid stays intact for when data arrives
+  function showEmptyState() {}
+
+  // -- Init + polling --
+  function init() {
+    fetchJson("/api/v1/usage").then(function(current) {
+      if (!current) {
+        showEmptyState();
+        setTimeout(loadData, 5000);
+        return;
+      }
+      lastFetchTime = new Date();
+      fetchJson("/api/v1/usage/history").then(function(history) {
+        render(current, history);
+        startUpdateTimer();
+      });
+    });
+  }
+
+  init();
+  setInterval(loadData, 30000);
+})();
+
+// -- Theme toggle --
+document.getElementById("theme-toggle").addEventListener("change", function() {
+  document.documentElement.classList.toggle("pf-v6-theme-dark", this.checked);
+  document.querySelector("#theme-switch .pf-v6-c-switch__label").textContent =
+    this.checked ? "Dark mode" : "Light mode";
+});
+
+// -- Modal helpers --
+function closeModal() {
+  var m = document.getElementById("modal-overlay");
+  if (m) m.remove();
+}
+
+function copyToClipboard(btn, text) {
+  navigator.clipboard.writeText(text).then(function() {
+    var orig = btn.textContent;
+    btn.textContent = "Copied!";
+    setTimeout(function() { btn.textContent = orig; }, 1500);
+  });
+}
+
+// -- API Code modal --
+function showCodeModal() {
+  var base = location.origin;
+
+  var curlCode = '# Current usage (per-user tokens, cost, vLLM metrics)\n'
+    + 'curl -s ' + base + '/api/v1/usage | python3 -m json.tool\n'
+    + '\n# Per-user usage\n'
+    + 'curl -s ' + base + '/api/v1/usage/developer-a\n'
+    + '\n# Usage history (time series, powers charts)\n'
+    + 'curl -s ' + base + '/api/v1/usage/history\n'
+    + '\n# Just the vLLM metrics\n'
+    + 'curl -s ' + base + '/api/v1/usage | python3 -c "\n'
+    + 'import json, sys\n'
+    + 'd = json.load(sys.stdin)\n'
+    + 'v = d[\'vllm_metrics\']\n'
+    + 'print(f\'Cache hit rate: {v[\"cache_hit_rate_pct\"]}%\')\n'
+    + 'print(f\'TTFT P50/P95:  {v[\"ttft_p50_ms\"]}ms / {v[\"ttft_p95_ms\"]}ms\')\n'
+    + 'print(f\'Self-hosted:   ${v[\"self_hosted_usd\"]:.4f}\')\n'
+    + 'print(f\'Input rate:    ${d[\"cost_per_input_token\"]*1e6:.2f}/M\')\n'
+    + 'print(f\'Output rate:   ${d[\"cost_per_output_token\"]*1e6:.2f}/M\')\n'
+    + '"';
+
+  var pyCode = 'import httpx\n\n'
+    + 'BASE = "' + base + '"\n\n'
+    + '# Current usage + vLLM metrics\n'
+    + 'data = httpx.get(f"{BASE}/api/v1/usage").json()\n\n'
+    + '# Per-user token usage and cost\n'
+    + 'for user in data["usage"]:\n'
+    + '    print(f"{user[\'userid\']}: {user[\'tokens_used\']:,} tokens, ${user[\'cost_usd\']:.4f}")\n\n'
+    + '# vLLM performance metrics\n'
+    + 'v = data["vllm_metrics"]\n'
+    + 'print(f"KV Cache Hit Rate: {v[\'cache_hit_rate_pct\']}%")\n'
+    + 'print(f"TTFT P50: {v[\'ttft_p50_ms\']}ms  P95: {v[\'ttft_p95_ms\']}ms")\n'
+    + 'print(f"Token latency (TPOT): {v[\'tpot_p50_ms\']}ms")\n'
+    + 'print(f"GPU KV Cache used: {v[\'kv_cache_usage_pct\']}%")\n\n'
+    + '# Cost comparison\n'
+    + 'print(f"Self-hosted cost: ${v[\'self_hosted_usd\']:.4f}")\n'
+    + 'print(f"  Input rate:  ${data[\'cost_per_input_token\']*1e6:.2f}/M tokens")\n'
+    + 'print(f"  Output rate: ${data[\'cost_per_output_token\']*1e6:.2f}/M tokens")\n\n'
+    + '# Usage history (time series for charts)\n'
+    + 'history = httpx.get(f"{BASE}/api/v1/usage/history").json()\n'
+    + 'for snap in history["snapshots"]:\n'
+    + '    vm = snap.get("vllm_metrics", {})\n'
+    + '    total = sum(u["tokens_used"] for u in snap["usage"])\n'
+    + '    cache = vm.get("cache_hit_rate_pct", 0)\n'
+    + '    print(f"{snap[\'timestamp\']}: {total:,} tokens, cache: {cache}%")';
+
+  var jsCode = '// Fetch current usage + vLLM metrics\n'
+    + 'const data = await fetch("' + base + '/api/v1/usage").then(r => r.json());\n\n'
+    + '// Per-user token usage\n'
+    + 'data.usage.forEach(u => {\n'
+    + '  console.log(`${u.userid}: ${u.tokens_used.toLocaleString()} tokens, $${u.cost_usd.toFixed(4)}`);\n'
+    + '});\n\n'
+    + '// vLLM performance metrics\n'
+    + 'const v = data.vllm_metrics;\n'
+    + 'console.log(`KV Cache Hit Rate: ${v.cache_hit_rate_pct}%`);\n'
+    + 'console.log(`TTFT P50: ${v.ttft_p50_ms}ms  P95: ${v.ttft_p95_ms}ms`);\n'
+    + 'console.log(`Self-hosted: $${v.self_hosted_usd.toFixed(4)}`);\n'
+    + 'console.log(`Rates: $${(data.cost_per_input_token*1e6).toFixed(2)}/M in, $${(data.cost_per_output_token*1e6).toFixed(2)}/M out`);\n\n'
+    + '// Usage history (time series)\n'
+    + 'const history = await fetch("' + base + '/api/v1/usage/history").then(r => r.json());\n'
+    + 'history.snapshots.forEach(snap => {\n'
+    + '  const total = snap.usage.reduce((s, u) => s + u.tokens_used, 0);\n'
+    + '  const cache = (snap.vllm_metrics || {}).cache_hit_rate_pct || 0;\n'
+    + '  console.log(`${snap.timestamp}: ${total.toLocaleString()} tokens, cache: ${cache}%`);\n'
+    + '});';
+
+  var tabs = [
+    { id: "curl", label: "curl", code: curlCode },
+    { id: "python", label: "Python", code: pyCode },
+    { id: "js", label: "JavaScript", code: jsCode },
+  ];
+
+  var tabBar = '<div class="tab-bar">';
+  var panels = "";
+  tabs.forEach(function(t, i) {
+    tabBar += '<button onclick="switchTab(this,\'' + t.id + '\')" class="' + (i===0?"active":"") + '">' + t.label + '</button>';
+    panels += '<div class="tab-panel ' + (i===0?"active":"") + '" id="tab-' + t.id + '">'
+      + '<div class="code-block-wrap">'
+      + '<button class="pf-v6-c-button pf-m-plain pf-m-small copy-btn" type="button"'
+      + ' onclick="copyToClipboard(this, document.getElementById(\'code-' + t.id + '\').textContent)">Copy</button>'
+      + '<pre id="code-' + t.id + '">' + escHtml(t.code) + '</pre>'
+      + '</div></div>';
+  });
+  tabBar += '</div>';
+
+  openModal("API Code Examples", tabBar + panels);
+}
+
+function switchTab(btn, id) {
+  btn.closest(".tab-bar").querySelectorAll("button").forEach(function(b) { b.classList.remove("active"); });
+  btn.classList.add("active");
+  btn.closest(".modal-body").querySelectorAll(".tab-panel").forEach(function(p) { p.classList.remove("active"); });
+  document.getElementById("tab-" + id).classList.add("active");
+}
+
+// -- JSON viewer modal --
+function showJsonModal() {
+  Promise.all([
+    fetch("/api/v1/usage").then(function(r) { return r.json(); }).catch(function() { return null; }),
+    fetch("/api/v1/usage/history").then(function(r) { return r.json(); }).catch(function() { return null; }),
+  ]).then(function(results) {
+    var current = results[0];
+    var hist = results[1];
+    if (!current && !hist) { alert("Failed to fetch usage data"); return; }
+
+    var tabs = [];
+    if (current) {
+      tabs.push({ id: "json-current", label: "Current", json: current,
+        endpoint: "/api/v1/usage",
+        desc: "Live snapshot — per-user tokens, cost, limits. Powers the table and stat cards." });
+    }
+    if (hist) {
+      tabs.push({ id: "json-history", label: "History", json: hist,
+        endpoint: "/api/v1/usage/history",
+        desc: "Rolling 2-hour time series (30s intervals). Powers the bar chart and sparklines." });
+    }
+
+    var tabBar = '<div class="tab-bar">';
+    var panels = "";
+    tabs.forEach(function(t, i) {
+      var jsonStr = JSON.stringify(t.json, null, 2);
+      tabBar += '<button onclick="switchJsonTab(this,\'' + t.id + '\')" class="' + (i===0?"active":"") + '">' + t.label + '</button>';
+      panels += '<div class="tab-panel ' + (i===0?"active":"") + '" id="' + t.id + '">'
+        + '<div class="pf-v6-c-content pf-v6-u-mb-md"><p>' + t.desc + '</p></div>'
+        + '<div class="code-block-wrap">'
+        + '<button class="pf-v6-c-button pf-m-plain pf-m-small copy-btn" type="button"'
+        + ' onclick="copyToClipboard(this, document.getElementById(\'code-' + t.id + '\').textContent)">Copy</button>'
+        + '<pre id="code-' + t.id + '">' + escHtml(jsonStr) + '</pre>'
+        + '</div>'
+        + '<div class="pf-v6-c-content" style="margin-top:12px">'
+        + '<p>Endpoint: <code>' + location.origin + t.endpoint + '</code></p>'
+        + '</div></div>';
+    });
+    tabBar += '</div>';
+
+    openModal("API Response", tabBar + panels);
+  });
+}
+
+function switchJsonTab(btn, id) {
+  btn.closest(".tab-bar").querySelectorAll("button").forEach(function(b) { b.classList.remove("active"); });
+  btn.classList.add("active");
+  btn.closest(".modal-body").querySelectorAll(".tab-panel").forEach(function(p) { p.classList.remove("active"); });
+  document.getElementById(id).classList.add("active");
+}
+
+// -- Shared modal open --
+function openModal(title, bodyHtml) {
+  closeModal();
+  var overlay = document.createElement("div");
+  overlay.id = "modal-overlay";
+  overlay.className = "modal-backdrop";
+  overlay.onclick = function(e) { if (e.target === overlay) closeModal(); };
+  overlay.innerHTML =
+    '<div class="modal-box">'
+    + '<div class="modal-header">'
+    + '  <h2 class="pf-v6-c-title pf-m-xl">' + title + '</h2>'
+    + '  <button class="pf-v6-c-button pf-m-plain" type="button" onclick="closeModal()"'
+    + '    aria-label="Close">&times;</button>'
+    + '</div>'
+    + '<div class="modal-body">' + bodyHtml + '</div>'
+    + '</div>';
+  document.body.appendChild(overlay);
+}
+
+function showSelfHostedBasis() {
+  fetch("/api/v1/usage").then(function(r) { return r.json(); }).then(function(data) {
+    var cpIn = data.cost_per_input_token || data.cost_per_token || 0;
+    var cpOut = data.cost_per_output_token || data.cost_per_token || 0;
+    var cpInM = (cpIn * 1000000).toFixed(2);
+    var cpOutM = (cpOut * 1000000).toFixed(2);
+    var gpu = Number(data.gpu_cost_per_hour).toFixed(2);
+    var inst = data.instance_type || "unknown";
+    var vllm = data.vllm_metrics || {};
+    var promptTokens = vllm.prompt_tokens_total || 0;
+    var genTokens = vllm.generation_tokens_total || 0;
+    var totalTokens = promptTokens + genTokens;
+    var selfHosted = vllm.self_hosted_usd || 0;
+
+    var body =
+      '<div class="pf-v6-c-content" style="font-size:14px;line-height:1.8">'
+      + '<p style="margin-bottom:16px">The self-hosted cost shown on this dashboard is an <strong>internally agreed rate</strong> '
+      + 'set by the platform team to enable per-user chargeback and cost comparison.</p>'
+      + '<table class="pf-v6-c-table pf-m-compact" role="grid" style="margin-bottom:16px">'
+      + '<tbody class="pf-v6-c-table__tbody" role="rowgroup">'
+      + '<tr class="pf-v6-c-table__tr" role="row">'
+      + '  <td class="pf-v6-c-table__td" role="cell"><strong>Input token rate</strong></td>'
+      + '  <td class="pf-v6-c-table__td mono" role="cell">$' + cpInM + ' / 1M tokens</td>'
+      + '</tr>'
+      + '<tr class="pf-v6-c-table__tr" role="row">'
+      + '  <td class="pf-v6-c-table__td" role="cell"><strong>Output token rate</strong></td>'
+      + '  <td class="pf-v6-c-table__td mono" role="cell">$' + cpOutM + ' / 1M tokens</td>'
+      + '</tr>'
+      + '<tr class="pf-v6-c-table__tr" role="row">'
+      + '  <td class="pf-v6-c-table__td" role="cell"><strong>GPU instance</strong></td>'
+      + '  <td class="pf-v6-c-table__td" role="cell">' + inst + ' ($' + gpu + '/hr)</td>'
+      + '</tr>'
+      + '<tr class="pf-v6-c-table__tr" role="row">'
+      + '  <td class="pf-v6-c-table__td" role="cell"><strong>Input tokens served</strong></td>'
+      + '  <td class="pf-v6-c-table__td mono" role="cell">' + promptTokens.toLocaleString("en-US") + '</td>'
+      + '</tr>'
+      + '<tr class="pf-v6-c-table__tr" role="row">'
+      + '  <td class="pf-v6-c-table__td" role="cell"><strong>Output tokens served</strong></td>'
+      + '  <td class="pf-v6-c-table__td mono" role="cell">' + genTokens.toLocaleString("en-US") + '</td>'
+      + '</tr>'
+      + '<tr class="pf-v6-c-table__tr" role="row">'
+      + '  <td class="pf-v6-c-table__td" role="cell"><strong>Computed cost</strong></td>'
+      + '  <td class="pf-v6-c-table__td mono" role="cell">$' + selfHosted.toFixed(4) + '</td>'
+      + '</tr>'
+      + '</tbody></table>'
+      + '<p style="font-size:12px;color:var(--pf-t--global--text--color--subtle);line-height:1.5">'
+      + 'These rates are configured in the platform billing policy and account for GPU compute amortization, '
+      + 'infrastructure overhead, and target utilization. They are applied uniformly across all users and '
+      + 'cost centers for internal chargeback. Rates can be updated by the platform team in the '
+      + '<code>billing.yaml</code> configuration.'
+      + '</p></div>';
+    openModal("Self-Hosted Cost Basis", body);
+  });
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+</script>
+</body>
+</html>

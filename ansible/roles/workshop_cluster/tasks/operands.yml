@@ -1,0 +1,26 @@
+- name: Apply version-independent operand manifests
+  kubernetes.core.k8s:
+    state: present
+    src: "{{ item }}"
+  loop: >-
+    {{ lookup('fileglob', manifest_base_dir + '/operands/*.yaml', wantlist=true)
+       | reject('search', 'datasciencecluster')
+       | reject('search', 'gpt-oss-20b')
+       | reject('search', 'odhdashboardconfig')
+       | list }}
+  loop_control:
+    label: "{{ item | basename }}"
+
+- name: Apply DataScienceCluster manifest (RHOAI {{ rhoai_version }})
+  kubernetes.core.k8s:
+    state: present
+    src: "{{ manifest_base_dir }}/operands/datasciencecluster-{{ rhoai_version }}.yaml"
+
+- name: Apply OdhDashboardConfig (after DSC registers CRD)
+  kubernetes.core.k8s:
+    state: present
+    src: "{{ manifest_base_dir }}/operands/odhdashboardconfig.yaml"
+  register: dashboard_config_result
+  retries: 20
+  delay: 15
+  until: dashboard_config_result is not failed

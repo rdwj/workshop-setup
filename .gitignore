@@ -1,0 +1,36 @@
+# Cluster credentials and secrets
+clusters/
+cluster_creds
+ansible/inventory/clusters.yml
+ansible/inventory/kagenti-rhoai.yml
+ansible/inventory/fips-rhoai.yml
+ansible/inventory/mcp-rhoai.yml
+ansible/inventory/34-rhoai.yml
+ansible/inventory/re-test-full-deployment.yml
+auth/htpasswd-secret.yaml
+
+# Model quantization (contains HF token)
+model/quantize-prometheus-8x7b.yaml
+
+# Ansible runtime artifacts
+*.retry
+
+# Scratch files from setup script
+scratch/
+
+# Generated catalog output
+mcp/catalog/generated-catalog.yaml
+
+# Guides
+guides/
+# Session scratch files
+NEXT_SESSION*.md
+
+# Sensitive / ephemeral
+mcp-token.txt
+ansible/inventory/mcp-demo.yml
+.DS_Store
+site/
+
+# Compiled Wasm binaries
+*.wasm

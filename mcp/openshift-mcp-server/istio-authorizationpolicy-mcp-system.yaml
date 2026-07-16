@@ -1,0 +1,17 @@
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: mcp-broker-require-jwt
+  namespace: mcp-system
+spec:
+  # Apply to all workloads in the namespace
+  action: DENY
+  rules:
+    - from:
+        - source:
+            notRequestPrincipals: ["*"]
+      to:
+        - operation:
+            paths: ["/mcp*", "/sse*", "/message*"]
+            # Don't block well-known endpoints or health checks
+            notPaths: ["/.well-known/*", "/healthz", "/stats", "/metrics"]

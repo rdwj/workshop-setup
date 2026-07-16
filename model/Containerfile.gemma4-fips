@@ -1,0 +1,11 @@
+FROM registry.redhat.io/rhaii-preview/vllm-cuda-rhel9:gemma4
+
+# Fix FIPS compliance: opencv-python-headless bundles OpenSSL 1.1.1k
+# which fails the kernel FIPS self-test on FIPS-enabled clusters.
+# vLLM uses Pillow (not opencv) for image processing, so opencv is
+# safe to remove. See: crypto/fips/fips.c:154 FATAL FIPS SELFTEST FAILURE
+USER 0
+RUN pip uninstall -y opencv-python-headless && \
+    rm -rf /opt/vllm/lib/python3.12/site-packages/opencv_python_headless.libs/ && \
+    rm -rf /opt/vllm/lib/python3.12/site-packages/opencv_python_headless*
+USER 2000

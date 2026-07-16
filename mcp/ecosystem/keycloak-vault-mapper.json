@@ -1,0 +1,12 @@
+{
+  "name": "mcp-agent-audience",
+  "protocol": "openid-connect",
+  "protocolMapper": "oidc-audience-mapper",
+  "consentRequired": false,
+  "config": {
+    "included.client.audience": "mcp-agent",
+    "id.token.claim": "true",
+    "access.token.claim": "true",
+    "introspection.token.claim": "true"
+  }
+}

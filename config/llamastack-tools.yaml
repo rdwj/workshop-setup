@@ -1,0 +1,19 @@
+# LlamaStack tool group registrations.
+#
+# Each entry registers an MCP server as a tool group via
+# POST /v1/toolgroups. LlamaStack connects to the MCP server,
+# discovers available tools, and exposes them through its
+# inference and tool_runtime APIs.
+#
+# Fields:
+#   toolgroup_id  - Identifier for the tool group (convention: mcp::<name>)
+#   provider_id   - Must be "model-context-protocol"
+#   mcp_endpoint  - Full URL to the MCP server's SSE/streamable-http endpoint
+#
+# The remote::model-context-protocol provider must be listed under
+# providers.tool_runtime in your LlamaStack server config.
+
+toolgroups:
+  - toolgroup_id: "mcp::calculus-helper"
+    provider_id: "model-context-protocol"
+    mcp_endpoint: "https://mcp-server-calculus-helper-mcp.apps.cluster.example.com/mcp/"

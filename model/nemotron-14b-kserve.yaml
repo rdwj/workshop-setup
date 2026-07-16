@@ -1,0 +1,104 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nemotron-model
+  labels:
+    opendatahub.io/dashboard: "true"
+---
+apiVersion: serving.kserve.io/v1alpha1
+kind: ServingRuntime
+metadata:
+  name: vllm-nemotron-runtime
+  namespace: nemotron-model
+  labels:
+    opendatahub.io/dashboard: "true"
+  annotations:
+    opendatahub.io/apiProtocol: REST
+    opendatahub.io/template-display-name: "vLLM Nemotron 14B Runtime"
+    opendatahub.io/template-name: vllm-nemotron-runtime
+    openshift.io/display-name: "vLLM Nemotron 14B Runtime"
+spec:
+  annotations:
+    prometheus.io/port: "8080"
+    prometheus.io/path: "/metrics"
+    io.kubernetes.cri-o.LogSizeMax: "104857600"
+  multiModel: false
+  supportedModelFormats:
+    - autoSelect: true
+      name: vLLM
+  containers:
+    - name: kserve-container
+      image: registry.redhat.io/rhaiis/vllm-cuda-rhel9:3
+      command:
+        - python3
+        - -m
+        - vllm.entrypoints.openai.api_server
+      args:
+        - --port=8080
+        - --model=/mnt/models
+        - --dtype=bfloat16
+        - --max-model-len=32768
+        - --kv-cache-dtype=auto
+        - --gpu-memory-utilization=0.95
+        - --max-num-seqs=16
+        - --enable-auto-tool-choice
+        - --tool-call-parser=hermes
+        - --enable-prefix-caching
+        - --enable-prompt-tokens-details
+        - --enable-server-load-tracking
+      env:
+        - name: HOME
+          value: /tmp/home
+        - name: HF_HOME
+          value: /tmp/hf-cache
+      ports:
+        - containerPort: 8080
+          protocol: TCP
+      resources:
+        requests:
+          cpu: "4"
+          memory: 16Gi
+        limits:
+          cpu: "8"
+          memory: 32Gi
+      volumeMounts:
+        - name: shm
+          mountPath: /dev/shm
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: shm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 8Gi
+    - name: tmp
+      emptyDir: {}
+---
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: nemotron-14b
+  namespace: nemotron-model
+  labels:
+    opendatahub.io/dashboard: "true"
+  annotations:
+    serving.kserve.io/deploymentMode: RawDeployment
+    serving.kserve.io/deploymentStrategy: Recreate
+    openshift.io/display-name: "OpenReasoning Nemotron 14B"
+spec:
+  predictor:
+    model:
+      modelFormat:
+        name: vLLM
+      runtime: vllm-nemotron-runtime
+      storageUri: "hf://nvidia/OpenReasoning-Nemotron-14B"
+      resources:
+        requests:
+          nvidia.com/gpu: "1"
+        limits:
+          nvidia.com/gpu: "1"
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule

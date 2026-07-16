@@ -1,0 +1,139 @@
+# Monitoring Stack — Grafana + vLLM ServiceMonitors
+#
+# Deploys a Grafana instance with a pre-built dashboard for monitoring
+# vLLM model serving and GPU utilization. Enables user workload monitoring
+# so Prometheus scrapes vLLM /metrics endpoints via ServiceMonitors.
+#
+# Prerequisites: Model deployments (granite-llm, gpt-oss-20b) should already
+# be running so the ServiceMonitors have endpoints to scrape. GPU operator
+# with DCGM exporter should be installed for GPU metrics.
+#
+# Usage: cd ansible && ansible-playbook monitoring.yml
+#
+- name: Monitoring Stack — Grafana + vLLM ServiceMonitors
+  hosts: all
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      host: "{{ k8s_host }}"
+      api_key: "{{ k8s_api_key }}"
+      validate_certs: "{{ validate_certs }}"
+  vars:
+    manifest_base_dir: "{{ playbook_dir }}/.."
+    grafana_retries: 18
+    grafana_delay: 10
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # User Workload Monitoring
+    # -------------------------------------------------------------------------
+
+    - name: Enable user workload monitoring
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: cluster-monitoring-config
+            namespace: openshift-monitoring
+          data:
+            config.yaml: |
+              enableUserWorkload: true
+
+    - name: Wait for user workload monitoring pods to be Running
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: openshift-user-workload-monitoring
+      register: uwm_pods
+      until:
+        - uwm_pods.resources | length > 0
+        - >-
+          uwm_pods.resources
+          | selectattr('status.phase', 'defined')
+          | selectattr('status.phase', 'equalto', 'Running')
+          | list | length >= 1
+      retries: 12
+      delay: 10
+
+    # -------------------------------------------------------------------------
+    # ServiceMonitors
+    # -------------------------------------------------------------------------
+
+    - name: Apply vLLM ServiceMonitors
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ doc }}"
+      loop: >-
+        {{
+          lookup('file', manifest_base_dir + '/monitoring/servicemonitors.yaml')
+          | from_yaml_all
+          | select('ne', none)
+          | list
+        }}
+      loop_control:
+        loop_var: doc
+        label: "{{ doc.kind }}/{{ doc.metadata.name }}"
+
+    # -------------------------------------------------------------------------
+    # Grafana Stack
+    # -------------------------------------------------------------------------
+
+    - name: Apply Grafana stack manifests
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ doc }}"
+      loop: >-
+        {{
+          lookup('file', manifest_base_dir + '/monitoring/grafana-stack.yaml')
+          | from_yaml_all
+          | select('ne', none)
+          | list
+        }}
+      loop_control:
+        loop_var: doc
+        label: "{{ doc.kind }}/{{ doc.metadata.name }}"
+
+    - name: Create Grafana dashboard ConfigMap
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: grafana-dashboards
+            namespace: grafana
+          data:
+            vllm-gpu.json: "{{ lookup('file', manifest_base_dir + '/monitoring/dashboards/vllm-gpu.json') }}"
+
+    # -------------------------------------------------------------------------
+    # Grafana Readiness
+    # -------------------------------------------------------------------------
+
+    - name: Wait for Grafana deployment to be ready
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: grafana
+        namespace: grafana
+      register: grafana_deploy_check
+      until:
+        - grafana_deploy_check.resources | length > 0
+        - grafana_deploy_check.resources[0].status.readyReplicas | default(0) | int >= 1
+      retries: "{{ grafana_retries | int }}"
+      delay: "{{ grafana_delay | int }}"
+
+    - name: Get Grafana route
+      kubernetes.core.k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        name: grafana
+        namespace: grafana
+      register: grafana_route
+
+    - name: Monitoring stack deployed
+      ansible.builtin.debug:
+        msg: >-
+          Grafana is ready.
+          Dashboard: https://{{ grafana_route.resources[0].spec.host }}/d/vllm-gpu-dashboard

@@ -1,0 +1,100 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: finops-api
+  namespace: models-as-a-service
+  labels:
+    app: finops-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: finops-api
+  template:
+    metadata:
+      labels:
+        app: finops-api
+    spec:
+      containers:
+        - name: finops-api
+          image: image-registry.openshift-image-registry.svc:5000/models-as-a-service/finops-api:latest
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: LIMITADOR_URL
+              value: "http://limitador-limitador.kuadrant-system.svc:8080"
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: finops-api-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: finops-api
+  namespace: models-as-a-service
+  labels:
+    app: finops-api
+spec:
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http
+  selector:
+    app: finops-api
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: finops-api
+  namespace: models-as-a-service
+  annotations:
+    haproxy.router.openshift.io/timeout: 60s
+spec:
+  tls:
+    termination: edge
+  to:
+    kind: Service
+    name: finops-api
+  port:
+    targetPort: http
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: finops-api
+  namespace: models-as-a-service
+  labels:
+    app: finops-api
+spec:
+  selector:
+    matchLabels:
+      app: finops-api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s

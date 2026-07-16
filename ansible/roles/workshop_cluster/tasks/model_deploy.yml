@@ -1,0 +1,4 @@
+- name: Apply gpt-oss-20b model deployment
+  kubernetes.core.k8s:
+    state: present
+    src: "{{ manifest_base_dir }}/operands/gpt-oss-20b-deployment.yaml"

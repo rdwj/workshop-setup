@@ -1,0 +1,42 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: metrics-reader
+  namespace: openshift-monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: metrics-reader-monitoring-view
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-monitoring-view
+subjects:
+  - kind: ServiceAccount
+    name: metrics-reader
+    namespace: openshift-monitoring
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: metrics-reader-token
+  namespace: openshift-monitoring
+  annotations:
+    kubernetes.io/service-account.name: metrics-reader
+type: kubernetes.io/service-account-token
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: thanos-querier
+  namespace: openshift-monitoring
+spec:
+  to:
+    kind: Service
+    name: thanos-querier
+  port:
+    targetPort: web
+  tls:
+    termination: reencrypt

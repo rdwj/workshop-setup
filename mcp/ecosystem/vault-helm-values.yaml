@@ -1,0 +1,21 @@
+# HashiCorp Vault Helm values for MCP Gateway cluster
+# Deploy with:
+#   helm install vault hashicorp/vault -n vault -f vault-helm-values.yaml \
+#     --kube-context="$CTX" --wait --timeout 120s
+
+global:
+  openshift: true
+
+server:
+  dev:
+    enabled: true
+    devRootToken: root
+  image:
+    repository: docker.io/hashicorp/vault
+    tag: "1.17"
+
+injector:
+  enabled: false
+
+ui:
+  enabled: true

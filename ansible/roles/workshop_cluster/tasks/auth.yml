@@ -1,0 +1,21 @@
+- name: Apply auth manifests
+  kubernetes.core.k8s:
+    state: present
+    src: "{{ item }}"
+  loop: "{{ lookup('fileglob', manifest_base_dir + '/auth/*.yaml', wantlist=true) }}"
+  loop_control:
+    label: "{{ item | basename }}"
+
+- name: Create workshop groups
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: user.openshift.io/v1
+      kind: Group
+      metadata:
+        name: "{{ item }}"
+      users:
+        - admin1
+  loop:
+    - rhods-admins
+    - workshop-users

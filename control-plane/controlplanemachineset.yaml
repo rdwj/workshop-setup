@@ -1,0 +1,107 @@
+# ControlPlaneMachineSet — apply AFTER all 3 masters are Running
+#
+# The CPMS admission webhook requires spec.replicas to match the current
+# number of control plane Machine objects, and only allows values of 3 or 5.
+# This means you CANNOT use CPMS to scale up from a single master.
+#
+# Workflow:
+#   1. Apply master-1.yaml and master-2.yaml to create the missing masters
+#   2. Wait for all 3 masters to reach Running phase and join etcd
+#   3. Apply this file to let the CPMS operator manage them going forward
+#
+apiVersion: machine.openshift.io/v1
+kind: ControlPlaneMachineSet
+metadata:
+  name: cluster                          # Must always be "cluster"
+  namespace: openshift-machine-api
+spec:
+  replicas: 3
+  state: Active
+
+  strategy:
+    type: RollingUpdate                  # Replaces machines one at a time, preserving quorum
+
+  selector:
+    matchLabels:
+      machine.openshift.io/cluster-api-cluster: cluster-kbm2h-vpnwm
+      machine.openshift.io/cluster-api-machine-role: master
+      machine.openshift.io/cluster-api-machine-type: master
+
+  template:
+    machineType: machines_v1beta1_machine_openshift_io
+    machines_v1beta1_machine_openshift_io:
+
+      metadata:
+        labels:
+          machine.openshift.io/cluster-api-cluster: cluster-kbm2h-vpnwm
+          machine.openshift.io/cluster-api-machine-role: master
+          machine.openshift.io/cluster-api-machine-type: master
+
+      spec:
+        providerSpec:
+          value:
+            apiVersion: machine.openshift.io/v1beta1
+            kind: AWSMachineProviderConfig
+            ami:
+              id: ami-0a611e6a24a551a2b
+            instanceType: m6a.2xlarge
+            blockDevices:
+              - ebs:
+                  encrypted: true
+                  iops: 0
+                  kmsKey:
+                    arn: ""
+                  volumeSize: 100
+                  volumeType: gp2
+            iamInstanceProfile:
+              id: cluster-kbm2h-vpnwm-master-profile
+            credentialsSecret:
+              name: aws-cloud-credentials
+            placement:
+              availabilityZone: us-east-2b
+              region: us-east-2
+            deviceIndex: 0
+            subnet:
+              filters:
+                - name: tag:Name
+                  values:
+                    - cluster-kbm2h-vpnwm-subnet-private-us-east-2b
+            securityGroups:
+              - filters:
+                  - name: tag:Name
+                    values:
+                      - cluster-kbm2h-vpnwm-node
+              - filters:
+                  - name: tag:Name
+                    values:
+                      - cluster-kbm2h-vpnwm-lb
+              - filters:
+                  - name: tag:Name
+                    values:
+                      - cluster-kbm2h-vpnwm-controlplane
+            loadBalancers:
+              - name: cluster-kbm2h-vpnwm-int
+                type: network
+              - name: cluster-kbm2h-vpnwm-ext
+                type: network
+            tags:
+              - name: kubernetes.io/cluster/cluster-kbm2h-vpnwm
+                value: owned
+              - name: Stack
+                value: project ocp4-cluster-kbm2h
+              - name: env_type
+                value: ocp4-cluster
+              - name: guid
+                value: kbm2h
+              - name: owner
+                value: unknown
+              - name: platform
+                value: RHPDS
+              - name: uuid
+                value: e0a6c73c-d9b5-5568-97f6-d2c00dc4ad9d
+            userDataSecret:
+              name: master-user-data
+            metadataServiceOptions: {}
+            capacityReservationId: ""
+            metadata:
+              creationTimestamp: null

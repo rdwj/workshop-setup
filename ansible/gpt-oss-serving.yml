@@ -1,0 +1,131 @@
+# GPT-OSS-20B + EAGLE3 Speculative Decoding Addon
+#
+# Deploys RedHatAI/gpt-oss-20b with EAGLE3 speculative decoding on a
+# GPU-enabled cluster. Ensures at least 2 GPU nodes are available (one for
+# existing workloads like Granite, one for GPT-OSS).
+#
+# Prerequisites: GPU infrastructure must already be installed (via site.yml
+# or gpu-model-serving.yml). This playbook scales the GPU MachineSet to 2
+# replicas if it isn't already.
+#
+# Usage: cd ansible && ansible-playbook gpt-oss-serving.yml
+#
+- name: GPT-OSS-20B + EAGLE3 Speculative Decoding Addon — Scale GPU MachineSet, Deploy GPT-OSS
+  hosts: all
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      host: "{{ k8s_host }}"
+      api_key: "{{ k8s_api_key }}"
+      validate_certs: "{{ validate_certs }}"
+  vars:
+    manifest_base_dir: "{{ playbook_dir }}/.."
+    model_namespace: gpt-oss-model
+    model_deployment_name: gpt-oss-20b
+    model_route_name: gpt-oss-20b
+    model_deploy_retries: 60
+    model_deploy_delay: 30
+    gpu_replicas_needed: 2
+
+  tasks:
+    # -------------------------------------------------------------------------
+    # GPU MachineSet Scaling (ensure 2 replicas for GPT-OSS alongside Granite)
+    # -------------------------------------------------------------------------
+
+    - name: Fetch existing MachineSets
+      kubernetes.core.k8s_info:
+        api_version: machine.openshift.io/v1beta1
+        kind: MachineSet
+        namespace: openshift-machine-api
+      register: machinesets_result
+
+    - name: Verify at least one MachineSet exists
+      ansible.builtin.assert:
+        that:
+          - machinesets_result.resources | length > 0
+        fail_msg: "No MachineSets found in openshift-machine-api. Is this an AWS cluster?"
+
+    - name: Find existing GPU MachineSet
+      ansible.builtin.set_fact:
+        gpu_machineset_resource: >-
+          {{
+            machinesets_result.resources
+            | selectattr('metadata.name', 'match', '^' + gpu_machineset_prefix)
+            | list
+            | first
+          }}
+
+    - name: Patch GPU MachineSet to {{ gpu_replicas_needed }} replicas
+      kubernetes.core.k8s:
+        api_version: machine.openshift.io/v1beta1
+        kind: MachineSet
+        name: "{{ gpu_machineset_resource.metadata.name }}"
+        namespace: openshift-machine-api
+        definition:
+          spec:
+            replicas: "{{ gpu_replicas_needed }}"
+        merge_type: merge
+
+    - name: Wait for {{ gpu_replicas_needed }} GPU nodes with nvidia.com/gpu capacity
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Node
+      register: gpu_node_check
+      until:
+        - >-
+          gpu_node_check.resources
+          | selectattr('status.capacity', 'defined')
+          | map(attribute='status.capacity')
+          | map('dict2items')
+          | flatten
+          | selectattr('key', 'equalto', 'nvidia.com/gpu')
+          | selectattr('value', 'ne', '0')
+          | list | length >= gpu_replicas_needed
+      retries: "{{ gpu_node_retries | int }}"
+      delay: "{{ gpu_node_delay | int }}"
+
+    # -------------------------------------------------------------------------
+    # GPT-OSS-20B Model Deployment
+    # -------------------------------------------------------------------------
+
+    - name: Apply GPT-OSS-20B manifest
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ doc }}"
+      loop: >-
+        {{
+          lookup('file', manifest_base_dir + '/model/gpt-oss-20b.yaml')
+          | from_yaml_all
+          | select('ne', none)
+          | list
+        }}
+      loop_control:
+        loop_var: doc
+        label: "{{ doc.kind }}/{{ doc.metadata.name }}"
+
+    - name: Wait for GPT-OSS-20B deployment to be ready
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: "{{ model_deployment_name }}"
+        namespace: "{{ model_namespace }}"
+      register: model_deploy_check
+      until:
+        - model_deploy_check.resources | length > 0
+        - model_deploy_check.resources[0].status.readyReplicas | default(0) | int >= 1
+      retries: "{{ model_deploy_retries | int }}"
+      delay: "{{ model_deploy_delay | int }}"
+
+    - name: Get GPT-OSS-20B route hostname
+      kubernetes.core.k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        name: "{{ model_route_name }}"
+        namespace: "{{ model_namespace }}"
+      register: gpt_oss_route
+
+    - name: GPT-OSS-20B + EAGLE3 setup complete
+      ansible.builtin.debug:
+        msg: >-
+          GPT-OSS-20B with EAGLE3 speculative decoding is ready.
+          Endpoint: https://{{ gpt_oss_route.resources[0].spec.host }}/v1

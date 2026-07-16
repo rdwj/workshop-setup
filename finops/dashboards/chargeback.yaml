@@ -1,0 +1,183 @@
+---
+apiVersion: perses.dev/v1alpha2
+kind: PersesDashboard
+metadata:
+  name: finops-chargeback
+  namespace: finops
+  labels:
+    app: finops
+spec:
+  config:
+    display:
+      name: "FinOps Chargeback"
+    duration: "1h"
+    variables: []
+    panels:
+      total-tokens-today:
+        kind: "Panel"
+        spec:
+          display:
+            name: "Total Tokens Today"
+          plugin:
+            kind: StatChart
+            spec:
+              queries:
+                - spec:
+                    plugin:
+                      kind: PrometheusTimeSeriesQuery
+                      spec:
+                        datasource:
+                          kind: PrometheusDatasource
+                          name: thanos-querier
+                        query: "sum(increase(vllm:generation_tokens_total[24h]))"
+      tokens-by-model:
+        kind: "Panel"
+        spec:
+          display:
+            name: "Tokens by Model"
+          plugin:
+            kind: TimeSeriesChart
+            spec:
+              queries:
+                - spec:
+                    plugin:
+                      kind: PrometheusTimeSeriesQuery
+                      spec:
+                        datasource:
+                          kind: PrometheusDatasource
+                          name: thanos-querier
+                        query: "rate(vllm:generation_tokens_total[5m])"
+      request-volume:
+        kind: "Panel"
+        spec:
+          display:
+            name: "Request Volume"
+          plugin:
+            kind: TimeSeriesChart
+            spec:
+              queries:
+                - spec:
+                    plugin:
+                      kind: PrometheusTimeSeriesQuery
+                      spec:
+                        datasource:
+                          kind: PrometheusDatasource
+                          name: thanos-querier
+                        query: "sum by (namespace) (rate(vllm:e2e_request_latency_seconds_count[5m]))"
+      token-usage-breakdown:
+        kind: "Panel"
+        spec:
+          display:
+            name: "Token Usage Breakdown"
+          plugin:
+            kind: BarChart
+            spec:
+              queries:
+                - spec:
+                    plugin:
+                      kind: PrometheusTimeSeriesQuery
+                      spec:
+                        datasource:
+                          kind: PrometheusDatasource
+                          name: thanos-querier
+                        query: "increase(vllm:generation_tokens_total[1h])"
+      cost-by-consumer:
+        kind: "Panel"
+        spec:
+          display:
+            name: "Cost by Consumer"
+          plugin:
+            kind: TimeSeriesChart
+            spec:
+              queries:
+                - spec:
+                    plugin:
+                      kind: PrometheusTimeSeriesQuery
+                      spec:
+                        datasource:
+                          kind: PrometheusDatasource
+                          name: thanos-querier
+                        query: "finops:gpu_cost_per_hour"
+      prompt-vs-generation:
+        kind: "Panel"
+        spec:
+          display:
+            name: "Prompt vs Generation Tokens"
+          plugin:
+            kind: TimeSeriesChart
+            spec:
+              queries:
+                - spec:
+                    plugin:
+                      kind: PrometheusTimeSeriesQuery
+                      spec:
+                        datasource:
+                          kind: PrometheusDatasource
+                          name: thanos-querier
+                        query: "rate(vllm:prompt_tokens_total[5m])"
+                - spec:
+                    plugin:
+                      kind: PrometheusTimeSeriesQuery
+                      spec:
+                        datasource:
+                          kind: PrometheusDatasource
+                          name: thanos-querier
+                        query: "rate(vllm:generation_tokens_total[5m])"
+    layouts:
+      - kind: "Grid"
+        spec:
+          display:
+            title: "Token Consumption"
+            collapse:
+              open: true
+          items:
+            - x: 0
+              y: 0
+              width: 12
+              height: 6
+              content:
+                $ref: "#/spec/config/panels/total-tokens-today"
+            - x: 12
+              y: 0
+              width: 12
+              height: 6
+              content:
+                $ref: "#/spec/config/panels/tokens-by-model"
+      - kind: "Grid"
+        spec:
+          display:
+            title: "Usage Analysis"
+            collapse:
+              open: true
+          items:
+            - x: 0
+              y: 0
+              width: 12
+              height: 8
+              content:
+                $ref: "#/spec/config/panels/request-volume"
+            - x: 12
+              y: 0
+              width: 12
+              height: 8
+              content:
+                $ref: "#/spec/config/panels/token-usage-breakdown"
+      - kind: "Grid"
+        spec:
+          display:
+            title: "Token Details"
+            collapse:
+              open: true
+          items:
+            - x: 0
+              y: 0
+              width: 12
+              height: 8
+              content:
+                $ref: "#/spec/config/panels/cost-by-consumer"
+            - x: 12
+              y: 0
+              width: 12
+              height: 8
+              content:
+                $ref: "#/spec/config/panels/prompt-vs-generation"

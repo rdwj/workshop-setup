@@ -1,0 +1,11 @@
+apiVersion: security.istio.io/v1
+kind: RequestAuthentication
+metadata:
+  name: mcp-broker-jwt
+  namespace: mcp-system
+spec:
+  # Apply to all workloads in mcp-system namespace that receive traffic through the waypoint
+  jwtRules:
+    - issuer: "https://keycloak-keycloak.apps.cluster-n7pd5.n7pd5.sandbox5167.opentlc.com/realms/mcp-gateway"
+      jwksUri: "https://keycloak-keycloak.apps.cluster-n7pd5.n7pd5.sandbox5167.opentlc.com/realms/mcp-gateway/protocol/openid-connect/certs"
+      forwardOriginalToken: true

@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: finops-api-config
+  namespace: models-as-a-service
+data:
+  billing.yaml: |
+    gpu_cost_per_hour: 1.40
+    instance_type: g6e.4xlarge
+    namespaces:
+      - namespace: "models-as-a-service/redhataigpt-oss-20b-kserve-route"
+        model: "gpt-oss-20b"
+        cost_per_token: 0.0000013
+        cost_per_input_token: 0.0000005
+        cost_per_output_token: 0.0000015
+      - namespace: "models-as-a-service/granite-8b-code-instruct-kserve-route"
+        model: "granite-8b"
+        cost_per_token: 0.0000004
+        cost_per_input_token: 0.0000002
+        cost_per_output_token: 0.0000005
+    subscriptions:
+      team-alpha:
+        cost_center: "data-science"
+        users: ["alpha-lead", "alpha-analyst"]
+      team-bravo:
+        cost_center: "engineering"
+        users: ["bravo-dev", "bravo-ml-eng"]
+      team-charlie:
+        cost_center: "executive"
+        users: ["charlie-pm"]
+      workshop-default:
+        cost_center: "workshop"
+        users: ["developer-a", "developer-b"]
+      default:
+        cost_center: "unassigned"
+        users: []

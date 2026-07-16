@@ -1,0 +1,148 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: granite-model
+  labels:
+    opendatahub.io/dashboard: "true"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: granite-model-cache
+  namespace: granite-model
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+---
+# NOTE: Granite 3.3 8B does NOT support OpenAI-compatible tool_calls — it generates
+# Python code instead of structured tool call responses. Do not use for agentic/MCP workflows.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: granite-3-3-8b-instruct
+  namespace: granite-model
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: granite-3-3-8b-instruct
+  template:
+    metadata:
+      labels:
+        app: granite-3-3-8b-instruct
+    spec:
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest
+          args:
+            - --model
+            - RedHatAI/granite-3.3-8b-instruct
+            - --port
+            - "8000"
+            - --dtype
+            - bfloat16
+            - --max-model-len
+            - "16384"
+            - --gpu-memory-utilization
+            - "0.9"
+            - --enable-auto-tool-choice
+            - --tool-call-parser
+            - granite
+            - --enable-prefix-caching
+            - --enable-prompt-tokens-details
+            - --enable-server-load-tracking
+          env:
+            - name: HOME
+              value: /tmp/home
+            - name: HF_HOME
+              value: /models/huggingface
+            - name: TRANSFORMERS_CACHE
+              value: /models/huggingface
+            - name: VLLM_CACHE_DIR
+              value: /models/vllm-cache
+            - name: XDG_CACHE_HOME
+              value: /tmp/cache
+          ports:
+            - containerPort: 8000
+          resources:
+            requests:
+              cpu: "2"
+              memory: 8Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "4"
+              memory: 16Gi
+              nvidia.com/gpu: "1"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 180
+            periodSeconds: 15
+            failureThreshold: 20
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 180
+            periodSeconds: 30
+            failureThreshold: 5
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+            - name: shm
+              mountPath: /dev/shm
+            - name: tmp-cache
+              mountPath: /tmp/cache
+            - name: tmp-home
+              mountPath: /tmp/home
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: granite-model-cache
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi
+        - name: tmp-cache
+          emptyDir: {}
+        - name: tmp-home
+          emptyDir: {}
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: granite-3-3-8b-instruct
+  namespace: granite-model
+  labels:
+    app: granite-3-3-8b-instruct
+spec:
+  selector:
+    app: granite-3-3-8b-instruct
+  ports:
+    - port: 80
+      targetPort: 8000
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: granite-3-3-8b-instruct
+  namespace: granite-model
+spec:
+  to:
+    kind: Service
+    name: granite-3-3-8b-instruct
+  port:
+    targetPort: 8000
+  tls:
+    termination: edge

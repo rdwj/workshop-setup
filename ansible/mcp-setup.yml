@@ -1,0 +1,410 @@
+# MCP Setup for RHOAI 3.4
+#
+# Installs the MCP Gateway Operator, creates a dedicated MCP Gateway with mcps listener,
+# and installs the MCP Lifecycle Operator.
+#
+# This playbook:
+#   1. Installs the MCP Gateway Operator (v0.6.0, OLM)
+#   2. Creates a dedicated MCP Gateway in mcp-system with mcps listener
+#   3. Creates the MCPGatewayExtension targeting the mcps listener
+#   4. Installs the MCP Lifecycle Operator (from GitHub release)
+#   5. Verifies all MCP CRDs and deployments
+#   6. Applies MCP Catalog and Playground ConfigMaps (optional)
+#
+# Prerequisites:
+#   - RHOAI 3.4 installed
+#   - Gateway infrastructure deployed (run gateway-infrastructure.yml)
+#
+# Usage: cd ansible && ansible-playbook mcp-setup.yml -i inventory/34-rhoai.yml
+#
+- name: MCP Setup for RHOAI 3.4
+  hosts: all
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      host: "{{ k8s_host }}"
+      api_key: "{{ k8s_api_key }}"
+      validate_certs: "{{ validate_certs }}"
+  vars:
+    manifest_base_dir: "{{ playbook_dir }}/.."
+    mcp_gateway_csv_name: "mcp-gateway.v0.6.0"
+    mcp_gateway_class: ""
+    deploy_mcp_configmaps: true
+
+    # Retry/delay settings
+    mcp_gateway_installplan_retries: 30
+    mcp_gateway_installplan_delay: 10
+    mcp_gateway_csv_retries: 40
+    mcp_gateway_csv_delay: 15
+    mcp_gateway_ready_retries: 30
+    mcp_gateway_ready_delay: 10
+    mcp_extension_retries: 30
+    mcp_extension_delay: 10
+    mcp_lifecycle_retries: 30
+    mcp_lifecycle_delay: 10
+
+  tasks:
+    # =========================================================================
+    # Phase 1: Install MCP Gateway Operator
+    # =========================================================================
+
+    - name: "Phase 1: Apply MCP Gateway operator Subscription"
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ doc }}"
+      loop: >-
+        {{
+          lookup('file', manifest_base_dir + '/mcp/mcp-gateway-operator.yaml')
+          | from_yaml_all
+          | select('ne', none)
+          | list
+        }}
+      loop_control:
+        loop_var: doc
+        label: "{{ doc.kind }}/{{ doc.metadata.name }}"
+
+    - name: "Phase 1: Check if MCP Gateway CSV already succeeded"
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        name: "{{ mcp_gateway_csv_name }}"
+        namespace: openshift-operators
+      register: mcp_gateway_csv_precheck
+
+    - name: "Phase 1: Set MCP Gateway CSV already-succeeded flag"
+      ansible.builtin.set_fact:
+        mcp_gateway_csv_already_succeeded: >-
+          {{
+            mcp_gateway_csv_precheck.resources | default([])
+            | selectattr('status.phase', 'defined')
+            | selectattr('status.phase', 'equalto', 'Succeeded')
+            | list | length > 0
+          }}
+
+    - name: "Phase 1: Wait for MCP Gateway InstallPlan"
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: InstallPlan
+        namespace: openshift-operators
+      register: mcp_gateway_installplan_result
+      until:
+        - >-
+          mcp_gateway_installplan_result.resources
+          | selectattr('spec.approved', 'equalto', false)
+          | selectattr('spec.clusterServiceVersionNames', 'defined')
+          | selectattr('spec.clusterServiceVersionNames', 'contains', mcp_gateway_csv_name)
+          | list | length > 0
+      retries: "{{ mcp_gateway_installplan_retries | int }}"
+      delay: "{{ mcp_gateway_installplan_delay | int }}"
+      when: not mcp_gateway_csv_already_succeeded | bool
+
+    - name: "Phase 1: Identify unapproved MCP Gateway InstallPlan"
+      ansible.builtin.set_fact:
+        mcp_gateway_unapproved_plan: >-
+          {{
+            mcp_gateway_installplan_result.resources
+            | selectattr('spec.approved', 'equalto', false)
+            | selectattr('spec.clusterServiceVersionNames', 'defined')
+            | selectattr('spec.clusterServiceVersionNames', 'contains', mcp_gateway_csv_name)
+            | map(attribute='metadata.name')
+            | first
+          }}
+      when: not mcp_gateway_csv_already_succeeded | bool
+
+    - name: "Phase 1: Approve MCP Gateway InstallPlan {{ mcp_gateway_unapproved_plan | default('N/A') }}"
+      kubernetes.core.k8s:
+        api_version: operators.coreos.com/v1alpha1
+        kind: InstallPlan
+        name: "{{ mcp_gateway_unapproved_plan }}"
+        namespace: openshift-operators
+        definition:
+          spec:
+            approved: true
+        merge_type: merge
+      when: not mcp_gateway_csv_already_succeeded | bool
+
+    - name: "Phase 1: MCP Gateway already installed, skipping InstallPlan approval"
+      ansible.builtin.debug:
+        msg: "MCP Gateway CSV {{ mcp_gateway_csv_name }} already Succeeded, skipping InstallPlan approval"
+      when: mcp_gateway_csv_already_succeeded | bool
+
+    - name: "Phase 1: Wait for MCP Gateway CSV to succeed"
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        name: "{{ mcp_gateway_csv_name }}"
+        namespace: openshift-operators
+      register: mcp_gateway_csv
+      until:
+        - mcp_gateway_csv.resources | default([]) | length > 0
+        - (mcp_gateway_csv.resources | default([{}]))[0].status.phase | default('') == 'Succeeded'
+      retries: "{{ mcp_gateway_csv_retries | int }}"
+      delay: "{{ mcp_gateway_csv_delay | int }}"
+
+    # =========================================================================
+    # Phase 2: Create dedicated MCP Gateway
+    # =========================================================================
+
+    - name: "Phase 2: Create mcp-system namespace"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: mcp-system
+
+    - name: "Phase 2: Get cluster Ingress config for apps domain"
+      kubernetes.core.k8s_info:
+        api_version: config.openshift.io/v1
+        kind: Ingress
+        name: cluster
+      register: cluster_ingress
+
+    - name: "Phase 2: Set cluster apps domain"
+      ansible.builtin.set_fact:
+        cluster_apps_domain: "{{ cluster_ingress.resources[0].spec.domain }}"
+
+    - name: "Phase 2: Discover GatewayClass"
+      kubernetes.core.k8s_info:
+        api_version: gateway.networking.k8s.io/v1
+        kind: GatewayClass
+      register: gateway_classes
+      when: mcp_gateway_class | length == 0
+
+    - name: "Phase 2: Set GatewayClass name"
+      ansible.builtin.set_fact:
+        discovered_gateway_class: "{{ gateway_classes.resources[0].metadata.name }}"
+      when: mcp_gateway_class | length == 0
+
+    - name: "Phase 2: Use configured GatewayClass"
+      ansible.builtin.set_fact:
+        discovered_gateway_class: "{{ mcp_gateway_class }}"
+      when: mcp_gateway_class | length > 0
+
+    - name: "Phase 2: Create MCP Gateway with mcps listener"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: gateway.networking.k8s.io/v1
+          kind: Gateway
+          metadata:
+            name: mcp-gateway
+            namespace: mcp-system
+          spec:
+            gatewayClassName: "{{ discovered_gateway_class }}"
+            listeners:
+              - name: mcps
+                hostname: "*.mcp.{{ cluster_apps_domain }}"
+                port: 8080
+                protocol: HTTP
+                allowedRoutes:
+                  namespaces:
+                    from: All
+              - name: https
+                hostname: "*.mcp.{{ cluster_apps_domain }}"
+                port: 443
+                protocol: HTTPS
+                allowedRoutes:
+                  namespaces:
+                    from: All
+                tls:
+                  mode: Terminate
+                  certificateRefs:
+                    - name: mcp-gateway-tls
+
+    - name: "Phase 2: Wait for Gateway to be Accepted"
+      kubernetes.core.k8s_info:
+        api_version: gateway.networking.k8s.io/v1
+        kind: Gateway
+        name: mcp-gateway
+        namespace: mcp-system
+      register: mcp_gateway_status
+      until:
+        - mcp_gateway_status.resources | default([]) | length > 0
+        - >-
+          mcp_gateway_status.resources[0].status.conditions | default([])
+          | selectattr('type', 'equalto', 'Accepted')
+          | selectattr('status', 'equalto', 'True')
+          | list | length > 0
+      retries: "{{ mcp_gateway_ready_retries | int }}"
+      delay: "{{ mcp_gateway_ready_delay | int }}"
+
+    - name: "Phase 2: Wait for Gateway to be Programmed"
+      kubernetes.core.k8s_info:
+        api_version: gateway.networking.k8s.io/v1
+        kind: Gateway
+        name: mcp-gateway
+        namespace: mcp-system
+      register: mcp_gateway_programmed
+      until:
+        - mcp_gateway_programmed.resources | default([]) | length > 0
+        - >-
+          mcp_gateway_programmed.resources[0].status.conditions | default([])
+          | selectattr('type', 'equalto', 'Programmed')
+          | selectattr('status', 'equalto', 'True')
+          | list | length > 0
+      retries: "{{ mcp_gateway_ready_retries | int }}"
+      delay: "{{ mcp_gateway_ready_delay | int }}"
+
+    # =========================================================================
+    # Phase 3: Create MCPGatewayExtension
+    # =========================================================================
+
+    - name: "Phase 3: Create MCPGatewayExtension"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: mcp.kuadrant.io/v1alpha1
+          kind: MCPGatewayExtension
+          metadata:
+            name: mcp-gateway
+            namespace: mcp-system
+          spec:
+            targetRef:
+              group: gateway.networking.k8s.io
+              kind: Gateway
+              name: mcp-gateway
+              namespace: mcp-system
+              sectionName: mcps
+            httpRouteManagement: Enabled
+
+    - name: "Phase 3: Wait for MCPGatewayExtension to be Ready"
+      kubernetes.core.k8s_info:
+        api_version: mcp.kuadrant.io/v1alpha1
+        kind: MCPGatewayExtension
+        name: mcp-gateway
+        namespace: mcp-system
+      register: mcp_extension_check
+      until:
+        - mcp_extension_check.resources | default([]) | length > 0
+        - >-
+          mcp_extension_check.resources[0].status.conditions | default([])
+          | selectattr('type', 'equalto', 'Ready')
+          | selectattr('status', 'equalto', 'True')
+          | list | length > 0
+      retries: "{{ mcp_extension_retries | int }}"
+      delay: "{{ mcp_extension_delay | int }}"
+
+    # =========================================================================
+    # Phase 4: Install MCP Lifecycle Operator
+    # =========================================================================
+
+    - name: "Phase 4: Check if MCPServer CRD already exists"
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: mcpservers.mcp.x-k8s.io
+      register: mcpserver_crd_check
+
+    - name: "Phase 4: Install MCP Lifecycle Operator from GitHub release"
+      kubernetes.core.k8s:
+        state: present
+        src: "https://github.com/kubernetes-sigs/mcp-lifecycle-operator/releases/latest/download/install.yaml"
+      when: mcpserver_crd_check.resources | length == 0
+
+    - name: "Phase 4: MCP Lifecycle Operator already installed"
+      ansible.builtin.debug:
+        msg: "MCPServer CRD already exists, skipping Lifecycle Operator install"
+      when: mcpserver_crd_check.resources | length > 0
+
+    - name: "Phase 4: Wait for MCP Lifecycle Operator deployment"
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: mcp-lifecycle-operator-system
+      register: lifecycle_deployments
+      until:
+        - lifecycle_deployments.resources | length > 0
+        - >-
+          lifecycle_deployments.resources
+          | selectattr('status.readyReplicas', 'defined')
+          | selectattr('status.readyReplicas', 'ge', 1)
+          | list | length > 0
+      retries: "{{ mcp_lifecycle_retries | int }}"
+      delay: "{{ mcp_lifecycle_delay | int }}"
+
+    - name: "Phase 4: Verify MCPServer CRD is available"
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: mcpservers.mcp.x-k8s.io
+      register: mcpserver_crd
+      until:
+        - mcpserver_crd.resources | length > 0
+      retries: 10
+      delay: 5
+
+    # =========================================================================
+    # Phase 5: Verify MCP Components
+    # =========================================================================
+
+    - name: "Phase 5: Check for MCP CRDs"
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+      register: all_crds
+
+    - name: "Phase 5: Verify MCP Gateway CRDs exist"
+      ansible.builtin.assert:
+        that:
+          - all_crds.resources | map(attribute='metadata.name') | select('search', 'mcp.kuadrant.io') | list | length >= 3
+        fail_msg: "Not all MCP CRDs (mcp.kuadrant.io) found. MCP Gateway operator may have failed to install."
+        success_msg: "MCP Gateway CRDs detected: {{ all_crds.resources | map(attribute='metadata.name') | select('search', 'mcp.kuadrant.io') | list | join(', ') }}"
+
+    - name: "Phase 5: Verify MCP Lifecycle Operator CRD"
+      ansible.builtin.assert:
+        that:
+          - all_crds.resources | map(attribute='metadata.name') | select('equalto', 'mcpservers.mcp.x-k8s.io') | list | length > 0
+        fail_msg: "MCPServer CRD (mcp.x-k8s.io) not found. MCP Lifecycle Operator may have failed to install."
+        success_msg: "MCPServer CRD (mcp.x-k8s.io) detected"
+
+    - name: "Phase 5: Wait for MCP Gateway deployment in mcp-system"
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: mcp-system
+      register: mcp_system_deployments
+      until:
+        - >-
+          mcp_system_deployments.resources
+          | selectattr('metadata.name', 'search', 'mcp')
+          | selectattr('status.readyReplicas', 'defined')
+          | selectattr('status.readyReplicas', 'ge', 1)
+          | list | length > 0
+      retries: "{{ mcp_extension_retries | int }}"
+      delay: "{{ mcp_extension_delay | int }}"
+
+    - name: "Phase 5: Get MCP endpoint URL"
+      ansible.builtin.set_fact:
+        mcp_endpoint: "http://mcp-gateway.mcp.{{ cluster_apps_domain }}"
+
+    # =========================================================================
+    # Phase 6: Apply MCP ConfigMaps (optional)
+    # =========================================================================
+
+    - name: "Phase 6: Generate MCP Catalog ConfigMaps"
+      ansible.builtin.command:
+        cmd: python3 generate-catalog.py -o generated-catalog.yaml
+        chdir: "{{ manifest_base_dir }}/mcp/catalog"
+      when: deploy_mcp_configmaps | bool
+
+    - name: "Phase 6: Apply MCP Catalog ConfigMaps"
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ manifest_base_dir }}/mcp/catalog/generated-catalog.yaml"
+      when: deploy_mcp_configmaps | bool
+
+    - name: "Phase 6: MCP ConfigMaps skipped"
+      ansible.builtin.debug:
+        msg: "MCP ConfigMaps skipped (deploy_mcp_configmaps=false)"
+      when: not (deploy_mcp_configmaps | bool)
+
+    - name: MCP setup complete
+      ansible.builtin.debug:
+        msg: >-
+          MCP Gateway and Lifecycle Operator are installed.
+          MCP Gateway: mcp-gateway (mcp-system)
+          MCP Lifecycle Operator: mcp-lifecycle-operator-system
+          MCP ConfigMaps: {{ 'applied' if (deploy_mcp_configmaps | bool) else 'skipped' }}
+          CRDs: mcpgatewayextensions, mcpserverregistrations, mcpvirtualservers, mcpservers

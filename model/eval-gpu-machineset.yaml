@@ -1,0 +1,84 @@
+---
+apiVersion: machine.openshift.io/v1beta1
+kind: MachineSet
+metadata:
+  annotations:
+    machine.openshift.io/GPU: "4"
+    machine.openshift.io/memoryMb: "393216"
+    machine.openshift.io/vCPU: "48"
+  labels:
+    machine.openshift.io/cluster-api-cluster: cluster-n7pd5-7kws6
+  name: eval-gpu-cluster-n7pd5-7kws6-worker-us-east-2a
+  namespace: openshift-machine-api
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      machine.openshift.io/cluster-api-cluster: cluster-n7pd5-7kws6
+      machine.openshift.io/cluster-api-machineset: eval-gpu-cluster-n7pd5-7kws6-worker-us-east-2a
+  template:
+    metadata:
+      labels:
+        machine.openshift.io/cluster-api-cluster: cluster-n7pd5-7kws6
+        machine.openshift.io/cluster-api-machine-role: worker
+        machine.openshift.io/cluster-api-machine-type: worker
+        machine.openshift.io/cluster-api-machineset: eval-gpu-cluster-n7pd5-7kws6-worker-us-east-2a
+    spec:
+      metadata: {}
+      providerSpec:
+        value:
+          ami:
+            id: ami-021a620474c1cd2fe
+          apiVersion: machine.openshift.io/v1beta1
+          blockDevices:
+            - ebs:
+                encrypted: true
+                iops: 0
+                kmsKey:
+                  arn: ""
+                volumeSize: 500
+                volumeType: gp3
+          credentialsSecret:
+            name: aws-cloud-credentials
+          deviceIndex: 0
+          iamInstanceProfile:
+            id: cluster-n7pd5-7kws6-worker-profile
+          instanceType: g6e.12xlarge
+          kind: AWSMachineProviderConfig
+          placement:
+            availabilityZone: us-east-2a
+            region: us-east-2
+          securityGroups:
+            - filters:
+                - name: tag:Name
+                  values:
+                    - cluster-n7pd5-7kws6-node
+            - filters:
+                - name: tag:Name
+                  values:
+                    - cluster-n7pd5-7kws6-lb
+          subnet:
+            filters:
+              - name: tag:Name
+                values:
+                  - cluster-n7pd5-7kws6-subnet-private-us-east-2a
+          tags:
+            - name: kubernetes.io/cluster/cluster-n7pd5-7kws6
+              value: owned
+            - name: Stack
+              value: project ocp4-cluster-n7pd5
+            - name: env_type
+              value: ocp4-cluster
+            - name: guid
+              value: n7pd5
+            - name: owner
+              value: unknown
+            - name: platform
+              value: RHPDS
+            - name: uuid
+              value: c2ec76ca-e138-5a2a-ad79-95b3429329d8
+          userDataSecret:
+            name: worker-user-data
+      taints:
+        - effect: NoSchedule
+          key: nvidia.com/gpu

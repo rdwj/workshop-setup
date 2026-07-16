@@ -1,0 +1,969 @@
+# MCP Ecosystem Setup for RHOAI 3.4
+#
+# Automates the full ecosystem setup including Keycloak, Vault, wristband keys,
+# and authentication policies for the MCP Gateway.
+#
+# This playbook:
+#   1. Deploys RHBK (Red Hat Build of Keycloak) operator
+#   2. Deploys Keycloak instance with PostgreSQL
+#   3. Configures Keycloak realm, clients, groups, and scopes
+#   4. Generates wristband signing keys (ECDSA P-256)
+#   5. Patches MCPGatewayExtension with trustedHeadersKey
+#   6. Deploys HashiCorp Vault via Helm
+#   7. Configures Vault JWT auth with Keycloak
+#   8. Applies AuthPolicy with wristband token issuance
+#   9. Verifies ecosystem components
+#
+# Prerequisites:
+#   - RHOAI 3.4 installed
+#   - Gateway infrastructure deployed (run gateway-infrastructure.yml)
+#   - MCP Gateway and Lifecycle Operator deployed (run mcp-setup.yml)
+#   - Helm installed on control machine
+#
+# Usage: cd ansible && ansible-playbook ecosystem-setup.yml -i inventory/34-rhoai.yml
+#
+- name: MCP Ecosystem Setup for RHOAI 3.4
+  hosts: all
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      host: "{{ k8s_host }}"
+      api_key: "{{ k8s_api_key }}"
+      validate_certs: "{{ validate_certs }}"
+  vars:
+    manifest_base_dir: "{{ playbook_dir }}/.."
+    rhbk_csv_name: "rhbk-operator.v24.0.7"
+    keycloak_namespace: keycloak
+    keycloak_realm: mcp-gateway
+    vault_namespace: vault
+    vault_dev_mode: true
+    vault_root_token: root
+
+    # Retry/delay settings
+    rhbk_installplan_retries: 30
+    rhbk_installplan_delay: 10
+    rhbk_csv_retries: 40
+    rhbk_csv_delay: 15
+    keycloak_ready_retries: 60
+    keycloak_ready_delay: 10
+    vault_retries: 30
+    vault_delay: 10
+
+  tasks:
+    # =========================================================================
+    # Phase 1: Deploy RHBK Operator
+    # =========================================================================
+
+    - name: "Phase 1: Create keycloak namespace"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ keycloak_namespace }}"
+
+    - name: "Phase 1: Create RHBK OperatorGroup"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: operators.coreos.com/v1
+          kind: OperatorGroup
+          metadata:
+            name: rhbk-operator-group
+            namespace: "{{ keycloak_namespace }}"
+          spec:
+            targetNamespaces:
+              - "{{ keycloak_namespace }}"
+
+    - name: "Phase 1: Create RHBK Subscription"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: operators.coreos.com/v1alpha1
+          kind: Subscription
+          metadata:
+            name: rhbk-operator
+            namespace: "{{ keycloak_namespace }}"
+          spec:
+            channel: stable-v24
+            installPlanApproval: Manual
+            name: rhbk-operator
+            source: redhat-operators
+            sourceNamespace: openshift-marketplace
+
+    - name: "Phase 1: Check if RHBK CSV already succeeded"
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        name: "{{ rhbk_csv_name }}"
+        namespace: "{{ keycloak_namespace }}"
+      register: rhbk_csv_precheck
+
+    - name: "Phase 1: Set RHBK CSV already-succeeded flag"
+      ansible.builtin.set_fact:
+        rhbk_csv_already_succeeded: >-
+          {{
+            rhbk_csv_precheck.resources | default([])
+            | selectattr('status.phase', 'defined')
+            | selectattr('status.phase', 'equalto', 'Succeeded')
+            | list | length > 0
+          }}
+
+    - name: "Phase 1: Wait for RHBK InstallPlan"
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: InstallPlan
+        namespace: "{{ keycloak_namespace }}"
+      register: rhbk_installplan_result
+      until:
+        - >-
+          rhbk_installplan_result.resources
+          | selectattr('spec.approved', 'equalto', false)
+          | selectattr('spec.clusterServiceVersionNames', 'defined')
+          | selectattr('spec.clusterServiceVersionNames', 'contains', rhbk_csv_name)
+          | list | length > 0
+      retries: "{{ rhbk_installplan_retries | int }}"
+      delay: "{{ rhbk_installplan_delay | int }}"
+      when: not rhbk_csv_already_succeeded | bool
+
+    - name: "Phase 1: Identify unapproved RHBK InstallPlan"
+      ansible.builtin.set_fact:
+        rhbk_unapproved_plan: >-
+          {{
+            rhbk_installplan_result.resources
+            | selectattr('spec.approved', 'equalto', false)
+            | selectattr('spec.clusterServiceVersionNames', 'defined')
+            | selectattr('spec.clusterServiceVersionNames', 'contains', rhbk_csv_name)
+            | map(attribute='metadata.name')
+            | first
+          }}
+      when: not rhbk_csv_already_succeeded | bool
+
+    - name: "Phase 1: Approve RHBK InstallPlan {{ rhbk_unapproved_plan | default('N/A') }}"
+      kubernetes.core.k8s:
+        api_version: operators.coreos.com/v1alpha1
+        kind: InstallPlan
+        name: "{{ rhbk_unapproved_plan }}"
+        namespace: "{{ keycloak_namespace }}"
+        definition:
+          spec:
+            approved: true
+        merge_type: merge
+      when: not rhbk_csv_already_succeeded | bool
+
+    - name: "Phase 1: RHBK already installed, skipping InstallPlan approval"
+      ansible.builtin.debug:
+        msg: "RHBK CSV {{ rhbk_csv_name }} already Succeeded, skipping InstallPlan approval"
+      when: rhbk_csv_already_succeeded | bool
+
+    - name: "Phase 1: Wait for RHBK CSV to succeed"
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        name: "{{ rhbk_csv_name }}"
+        namespace: "{{ keycloak_namespace }}"
+      register: rhbk_csv
+      until:
+        - rhbk_csv.resources | default([]) | length > 0
+        - (rhbk_csv.resources | default([{}]))[0].status.phase | default('') == 'Succeeded'
+      retries: "{{ rhbk_csv_retries | int }}"
+      delay: "{{ rhbk_csv_delay | int }}"
+
+    # =========================================================================
+    # Phase 2: Deploy Keycloak Instance
+    # =========================================================================
+
+    - name: "Phase 2: Create PostgreSQL for Keycloak"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: apps/v1
+          kind: StatefulSet
+          metadata:
+            name: postgresql-db
+            namespace: "{{ keycloak_namespace }}"
+          spec:
+            serviceName: postgresql-db-service
+            selector:
+              matchLabels:
+                app: postgresql-db
+            replicas: 1
+            template:
+              metadata:
+                labels:
+                  app: postgresql-db
+              spec:
+                containers:
+                  - name: postgresql-db
+                    image: postgres:15
+                    env:
+                      - name: POSTGRES_PASSWORD
+                        value: testpassword
+                      - name: POSTGRES_USER
+                        value: keycloak
+                      - name: POSTGRES_DB
+                        value: keycloak
+                      - name: PGDATA
+                        value: /var/lib/postgresql/data/pgdata
+                    ports:
+                      - containerPort: 5432
+                        name: postgresql-db
+                    volumeMounts:
+                      - name: data
+                        mountPath: /var/lib/postgresql/data
+            volumeClaimTemplates:
+              - metadata:
+                  name: data
+                spec:
+                  accessModes:
+                    - ReadWriteOnce
+                  resources:
+                    requests:
+                      storage: 1Gi
+
+    - name: "Phase 2: Create PostgreSQL Service"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: postgresql-db-service
+            namespace: "{{ keycloak_namespace }}"
+          spec:
+            type: ClusterIP
+            ports:
+              - port: 5432
+                targetPort: 5432
+            selector:
+              app: postgresql-db
+
+    - name: "Phase 2: Create Keycloak instance"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: k8s.keycloak.org/v2alpha1
+          kind: Keycloak
+          metadata:
+            name: keycloak
+            namespace: "{{ keycloak_namespace }}"
+          spec:
+            instances: 1
+            db:
+              vendor: postgres
+              host: postgresql-db-service
+              usernameSecret:
+                name: keycloak-db-secret
+                key: username
+              passwordSecret:
+                name: keycloak-db-secret
+                key: password
+            http:
+              tlsSecret: keycloak-tls-secret
+            hostname:
+              strict: false
+              strictBackchannel: false
+
+    - name: "Phase 2: Create Keycloak database secret"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: keycloak-db-secret
+            namespace: "{{ keycloak_namespace }}"
+          type: Opaque
+          stringData:
+            username: keycloak
+            password: testpassword
+
+    - name: "Phase 2: Get cluster Ingress config for apps domain"
+      kubernetes.core.k8s_info:
+        api_version: config.openshift.io/v1
+        kind: Ingress
+        name: cluster
+      register: cluster_ingress
+
+    - name: "Phase 2: Set cluster apps domain"
+      ansible.builtin.set_fact:
+        cluster_apps_domain: "{{ cluster_ingress.resources[0].spec.domain }}"
+
+    - name: "Phase 2: Create Keycloak Route"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: route.openshift.io/v1
+          kind: Route
+          metadata:
+            name: keycloak
+            namespace: "{{ keycloak_namespace }}"
+          spec:
+            to:
+              kind: Service
+              name: keycloak-service
+            tls:
+              termination: reencrypt
+              insecureEdgeTerminationPolicy: Redirect
+
+    - name: "Phase 2: Wait for Keycloak to be Ready"
+      kubernetes.core.k8s_info:
+        api_version: k8s.keycloak.org/v2alpha1
+        kind: Keycloak
+        name: keycloak
+        namespace: "{{ keycloak_namespace }}"
+      register: keycloak_status
+      until:
+        - keycloak_status.resources | default([]) | length > 0
+        - >-
+          keycloak_status.resources[0].status.conditions | default([])
+          | selectattr('type', 'equalto', 'Ready')
+          | selectattr('status', 'equalto', 'True')
+          | list | length > 0
+      retries: "{{ keycloak_ready_retries | int }}"
+      delay: "{{ keycloak_ready_delay | int }}"
+
+    - name: "Phase 2: Get Keycloak Route URL"
+      kubernetes.core.k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        name: keycloak
+        namespace: "{{ keycloak_namespace }}"
+      register: keycloak_route
+
+    - name: "Phase 2: Set Keycloak URL"
+      ansible.builtin.set_fact:
+        keycloak_url: "https://{{ keycloak_route.resources[0].spec.host }}"
+
+    # =========================================================================
+    # Phase 3: Configure Keycloak Realm
+    # =========================================================================
+
+    - name: "Phase 3: Get Keycloak admin credentials"
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: keycloak-initial-admin
+        namespace: "{{ keycloak_namespace }}"
+      register: keycloak_admin_secret
+
+    - name: "Phase 3: Set admin credentials"
+      ansible.builtin.set_fact:
+        keycloak_admin_user: "{{ keycloak_admin_secret.resources[0].data.username | b64decode }}"
+        keycloak_admin_pass: "{{ keycloak_admin_secret.resources[0].data.password | b64decode }}"
+
+    - name: "Phase 3: Get admin token"
+      ansible.builtin.uri:
+        url: "{{ keycloak_url }}/realms/master/protocol/openid-connect/token"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          client_id: admin-cli
+          username: "{{ keycloak_admin_user }}"
+          password: "{{ keycloak_admin_pass }}"
+          grant_type: password
+        validate_certs: false
+      register: admin_token_response
+
+    - name: "Phase 3: Set admin token"
+      ansible.builtin.set_fact:
+        keycloak_admin_token: "{{ admin_token_response.json.access_token }}"
+
+    - name: "Phase 3: Create mcp-gateway realm"
+      ansible.builtin.uri:
+        url: "{{ keycloak_url }}/admin/realms"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ keycloak_admin_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          realm: "{{ keycloak_realm }}"
+          enabled: true
+          displayName: "MCP Gateway"
+        status_code: [201, 409]
+        validate_certs: false
+      register: realm_creation
+
+    - name: "Phase 3: Create mcp-gateway client"
+      ansible.builtin.uri:
+        url: "{{ keycloak_url }}/admin/realms/{{ keycloak_realm }}/clients"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ keycloak_admin_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          clientId: mcp-gateway
+          enabled: true
+          serviceAccountsEnabled: true
+          standardFlowEnabled: false
+          directAccessGrantsEnabled: false
+        status_code: [201, 409]
+        validate_certs: false
+
+    - name: "Phase 3: Create mcp-playground client"
+      ansible.builtin.uri:
+        url: "{{ keycloak_url }}/admin/realms/{{ keycloak_realm }}/clients"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ keycloak_admin_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          clientId: mcp-playground
+          enabled: true
+          serviceAccountsEnabled: true
+          standardFlowEnabled: false
+          directAccessGrantsEnabled: false
+        status_code: [201, 409]
+        validate_certs: false
+
+    - name: "Phase 3: Create groups (mcp-admins, mcp-users, mcp-github)"
+      ansible.builtin.uri:
+        url: "{{ keycloak_url }}/admin/realms/{{ keycloak_realm }}/groups"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ keycloak_admin_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          name: "{{ item }}"
+        status_code: [201, 409]
+        validate_certs: false
+      loop:
+        - mcp-admins
+        - mcp-users
+        - mcp-github
+
+    - name: "Phase 3: Create groups client scope"
+      ansible.builtin.uri:
+        url: "{{ keycloak_url }}/admin/realms/{{ keycloak_realm }}/client-scopes"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ keycloak_admin_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          name: groups
+          protocol: openid-connect
+          protocolMappers:
+            - name: group-mapper
+              protocol: openid-connect
+              protocolMapper: oidc-group-membership-mapper
+              config:
+                access.token.claim: "true"
+                claim.name: groups
+                id.token.claim: "true"
+                full.path: "false"
+                userinfo.token.claim: "true"
+        status_code: [201, 409]
+        validate_certs: false
+
+    - name: "Phase 3: Get mcp-gateway client UUID"
+      ansible.builtin.uri:
+        url: "{{ keycloak_url }}/admin/realms/{{ keycloak_realm }}/clients?clientId=mcp-gateway"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ keycloak_admin_token }}"
+        validate_certs: false
+      register: mcp_gateway_client_response
+
+    - name: "Phase 3: Set mcp-gateway client UUID"
+      ansible.builtin.set_fact:
+        mcp_gateway_client_uuid: "{{ mcp_gateway_client_response.json[0].id }}"
+
+    - name: "Phase 3: Get groups scope ID"
+      ansible.builtin.uri:
+        url: "{{ keycloak_url }}/admin/realms/{{ keycloak_realm }}/client-scopes"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ keycloak_admin_token }}"
+        validate_certs: false
+      register: client_scopes_response
+
+    - name: "Phase 3: Set groups scope ID"
+      ansible.builtin.set_fact:
+        groups_scope_id: >-
+          {{
+            client_scopes_response.json
+            | selectattr('name', 'equalto', 'groups')
+            | map(attribute='id')
+            | first
+          }}
+
+    - name: "Phase 3: Assign groups scope to mcp-gateway client"
+      ansible.builtin.uri:
+        url: "{{ keycloak_url }}/admin/realms/{{ keycloak_realm }}/clients/{{ mcp_gateway_client_uuid }}/default-client-scopes/{{ groups_scope_id }}"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ keycloak_admin_token }}"
+        status_code: [204, 409]
+        validate_certs: false
+
+    - name: "Phase 3: Get service account user ID"
+      ansible.builtin.uri:
+        url: "{{ keycloak_url }}/admin/realms/{{ keycloak_realm }}/users?username=service-account-mcp-gateway"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ keycloak_admin_token }}"
+        validate_certs: false
+      register: sa_user_response
+
+    - name: "Phase 3: Set service account user ID"
+      ansible.builtin.set_fact:
+        sa_user_id: "{{ sa_user_response.json[0].id }}"
+
+    - name: "Phase 3: Get mcp-admins group ID"
+      ansible.builtin.uri:
+        url: "{{ keycloak_url }}/admin/realms/{{ keycloak_realm }}/groups"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ keycloak_admin_token }}"
+        validate_certs: false
+      register: groups_response
+
+    - name: "Phase 3: Set mcp-admins group ID"
+      ansible.builtin.set_fact:
+        admins_group_id: >-
+          {{
+            groups_response.json
+            | selectattr('name', 'equalto', 'mcp-admins')
+            | map(attribute='id')
+            | first
+          }}
+
+    - name: "Phase 3: Assign service account to mcp-admins group"
+      ansible.builtin.uri:
+        url: "{{ keycloak_url }}/admin/realms/{{ keycloak_realm }}/users/{{ sa_user_id }}/groups/{{ admins_group_id }}"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ keycloak_admin_token }}"
+        status_code: [204, 409]
+        validate_certs: false
+
+    # =========================================================================
+    # Phase 4: Generate Wristband Keys
+    # =========================================================================
+
+    - name: "Phase 4: Generate ECDSA P-256 private key"
+      ansible.builtin.command:
+        cmd: openssl ecparam -name prime256v1 -genkey -noout
+      register: private_key_result
+      changed_when: true
+
+    - name: "Phase 4: Generate ECDSA P-256 public key"
+      ansible.builtin.shell:
+        cmd: echo "{{ private_key_result.stdout }}" | openssl ec -pubout
+      register: public_key_result
+      changed_when: true
+
+    - name: "Phase 4: Create wristband-signing-key secret in kuadrant-system"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: wristband-signing-key
+            namespace: kuadrant-system
+          type: Opaque
+          stringData:
+            key.pem: "{{ private_key_result.stdout }}"
+
+    - name: "Phase 4: Create wristband-public-key secret in mcp-system"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: wristband-public-key
+            namespace: mcp-system
+          type: Opaque
+          stringData:
+            key: "{{ public_key_result.stdout }}"
+
+    # =========================================================================
+    # Phase 5: Patch MCPGatewayExtension
+    # =========================================================================
+
+    - name: "Phase 5: Patch MCPGatewayExtension with trustedHeadersKey"
+      kubernetes.core.k8s:
+        api_version: mcp.kuadrant.io/v1alpha1
+        kind: MCPGatewayExtension
+        name: mcp-gateway
+        namespace: mcp-system
+        definition:
+          spec:
+            trustedHeadersKey:
+              generate: Disabled
+              secretName: wristband-public-key
+        merge_type: merge
+
+    # =========================================================================
+    # Phase 6: Deploy Vault via Helm
+    # =========================================================================
+
+    - name: "Phase 6: Create vault namespace"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ vault_namespace }}"
+
+    - name: "Phase 6: Add HashiCorp Helm repo"
+      ansible.builtin.command:
+        cmd: helm repo add hashicorp https://helm.releases.hashicorp.com
+      register: helm_repo_add
+      changed_when: "'already exists' not in helm_repo_add.stderr"
+
+    - name: "Phase 6: Update Helm repos"
+      ansible.builtin.command:
+        cmd: helm repo update
+      changed_when: true
+
+    - name: "Phase 6: Deploy Vault via Helm"
+      ansible.builtin.command:
+        cmd: >-
+          helm upgrade --install vault hashicorp/vault
+          -n {{ vault_namespace }}
+          -f {{ manifest_base_dir }}/mcp/ecosystem/vault-helm-values.yaml
+          --wait --timeout 120s
+      changed_when: true
+
+    - name: "Phase 6: Wait for Vault pod to be ready"
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        name: vault-0
+        namespace: "{{ vault_namespace }}"
+      register: vault_pod_check
+      until:
+        - vault_pod_check.resources | default([]) | length > 0
+        - >-
+          vault_pod_check.resources[0].status.conditions | default([])
+          | selectattr('type', 'equalto', 'Ready')
+          | selectattr('status', 'equalto', 'True')
+          | list | length > 0
+      retries: "{{ vault_retries | int }}"
+      delay: "{{ vault_delay | int }}"
+
+    # =========================================================================
+    # Phase 7: Configure Vault JWT Auth
+    # =========================================================================
+
+    - name: "Phase 7: Extract ingress CA certificates"
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: ConfigMap
+        name: default-ingress-cert
+        namespace: openshift-config-managed
+      register: ingress_ca_configmap
+
+    - name: "Phase 7: Get router CA certificate"
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: router-ca
+        namespace: openshift-ingress-operator
+      register: router_ca_secret
+
+    - name: "Phase 7: Create ingress CA ConfigMap"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: ingress-ca
+            namespace: "{{ vault_namespace }}"
+          data:
+            ca-bundle.crt: >-
+              {{ ingress_ca_configmap.resources[0].data['ca-bundle.crt'] }}
+              {{ router_ca_secret.resources[0].data['tls.crt'] | b64decode }}
+
+    - name: "Phase 7: Check if Vault StatefulSet already has CA volume"
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: StatefulSet
+        name: vault
+        namespace: "{{ vault_namespace }}"
+      register: vault_statefulset
+
+    - name: "Phase 7: Determine if CA volume exists"
+      ansible.builtin.set_fact:
+        ca_volume_exists: >-
+          {{
+            vault_statefulset.resources[0].spec.template.spec.volumes | default([])
+            | selectattr('name', 'equalto', 'ingress-ca')
+            | list | length > 0
+          }}
+
+    - name: "Phase 7: Patch Vault StatefulSet with CA volume"
+      kubernetes.core.k8s:
+        api_version: apps/v1
+        kind: StatefulSet
+        name: vault
+        namespace: "{{ vault_namespace }}"
+        definition:
+          spec:
+            template:
+              spec:
+                volumes:
+                  - name: ingress-ca
+                    configMap:
+                      name: ingress-ca
+                containers:
+                  - name: vault
+                    volumeMounts:
+                      - name: ingress-ca
+                        mountPath: /vault/tls/ingress-ca.crt
+                        subPath: ca-bundle.crt
+                        readOnly: true
+        merge_type: strategic
+      when: not ca_volume_exists | bool
+
+    - name: "Phase 7: Delete Vault pod to pick up volume mount"
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Pod
+        name: vault-0
+        namespace: "{{ vault_namespace }}"
+        state: absent
+      when: not ca_volume_exists | bool
+
+    - name: "Phase 7: Wait for Vault pod to restart"
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        name: vault-0
+        namespace: "{{ vault_namespace }}"
+      register: vault_pod_restarted
+      until:
+        - vault_pod_restarted.resources | default([]) | length > 0
+        - >-
+          vault_pod_restarted.resources[0].status.conditions | default([])
+          | selectattr('type', 'equalto', 'Ready')
+          | selectattr('status', 'equalto', 'True')
+          | list | length > 0
+      retries: "{{ vault_retries | int }}"
+      delay: "{{ vault_delay | int }}"
+      when: not ca_volume_exists | bool
+
+    - name: "Phase 7: Enable KV v2 secrets engine"
+      kubernetes.core.k8s_exec:
+        namespace: "{{ vault_namespace }}"
+        pod: vault-0
+        command: vault secrets enable -path=mcp kv-v2
+      register: kv_enable_result
+      failed_when:
+        - kv_enable_result.rc != 0
+        - "'path is already in use' not in kv_enable_result.stderr"
+
+    - name: "Phase 7: Enable JWT auth"
+      kubernetes.core.k8s_exec:
+        namespace: "{{ vault_namespace }}"
+        pod: vault-0
+        command: vault auth enable jwt
+      register: jwt_enable_result
+      failed_when:
+        - jwt_enable_result.rc != 0
+        - "'path is already in use' not in jwt_enable_result.stderr"
+
+    - name: "Phase 7: Configure JWT auth with Keycloak JWKS"
+      kubernetes.core.k8s_exec:
+        namespace: "{{ vault_namespace }}"
+        pod: vault-0
+        command: >-
+          vault write auth/jwt/config
+          jwks_url={{ keycloak_url }}/realms/{{ keycloak_realm }}/protocol/openid-connect/certs
+          bound_issuer={{ keycloak_url }}/realms/{{ keycloak_realm }}
+          default_role=mcp-user
+          jwks_ca_pem=@/vault/tls/ingress-ca.crt
+
+    - name: "Phase 7: Create mcp-user policy"
+      kubernetes.core.k8s_exec:
+        namespace: "{{ vault_namespace }}"
+        pod: vault-0
+        command: /bin/sh
+        stdin: |
+          vault policy write mcp-user - <<POLICY
+          path "mcp/data/users/{{identity.entity.aliases.auth_jwt_*.metadata.username}}/*" {
+            capabilities = ["read"]
+          }
+          path "mcp/data/shared/*" {
+            capabilities = ["read"]
+          }
+          POLICY
+
+    - name: "Phase 7: Create mcp-user JWT role"
+      kubernetes.core.k8s_exec:
+        namespace: "{{ vault_namespace }}"
+        pod: vault-0
+        command: >-
+          vault write auth/jwt/role/mcp-user
+          bound_audiences=mcp-gateway,mcp-playground
+          user_claim=sub
+          claim_mappings=preferred_username=username
+          token_policies=mcp-user
+          token_ttl=5m
+          role_type=jwt
+
+    - name: "Phase 7: Store demo secrets"
+      kubernetes.core.k8s_exec:
+        namespace: "{{ vault_namespace }}"
+        pod: vault-0
+        command: >-
+          vault kv put mcp/users/service-account-mcp-gateway/github
+          token=ghp_demo_token_for_testing
+          api_key=demo-api-key-12345
+
+    - name: "Phase 7: Store shared demo secrets"
+      kubernetes.core.k8s_exec:
+        namespace: "{{ vault_namespace }}"
+        pod: vault-0
+        command: >-
+          vault kv put mcp/shared/defaults
+          api_key=shared-default-key
+
+    # =========================================================================
+    # Phase 8: Apply AuthPolicy with Wristband
+    # =========================================================================
+
+    - name: "Phase 8: Get mcp-gateway client secret"
+      ansible.builtin.uri:
+        url: "{{ keycloak_url }}/admin/realms/{{ keycloak_realm }}/clients/{{ mcp_gateway_client_uuid }}/client-secret"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ keycloak_admin_token }}"
+        validate_certs: false
+      register: client_secret_response
+
+    - name: "Phase 8: Set client secret"
+      ansible.builtin.set_fact:
+        mcp_gateway_client_secret: "{{ client_secret_response.json.value }}"
+
+    - name: "Phase 8: Create mcp-gateway-client-secret"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: mcp-gateway-client-secret
+            namespace: mcp-system
+          type: Opaque
+          stringData:
+            clientID: mcp-gateway
+            clientSecret: "{{ mcp_gateway_client_secret }}"
+
+    - name: "Phase 8: Apply AuthPolicy with wristband"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: kuadrant.io/v1beta3
+          kind: AuthPolicy
+          metadata:
+            name: mcp-gateway-auth
+            namespace: mcp-system
+          spec:
+            targetRef:
+              group: gateway.networking.k8s.io
+              kind: Gateway
+              name: mcp-gateway
+            rules:
+              authentication:
+                "keycloak-jwt":
+                  jwt:
+                    issuerUrl: "{{ keycloak_url }}/realms/{{ keycloak_realm }}"
+              response:
+                success:
+                  headers:
+                    "wristband":
+                      wristband:
+                        issuer: "{{ keycloak_url }}"
+                        signingKeyRefs:
+                          - name: wristband-signing-key
+                            algorithm: ES256
+                        tokenDuration: 300
+                        customClaims:
+                          - name: username
+                            value:
+                              selector: auth.identity.preferred_username
+                          - name: groups
+                            value:
+                              selector: auth.identity.groups
+
+    # =========================================================================
+    # Phase 9: Verification
+    # =========================================================================
+
+    - name: "Phase 9: Verify Keycloak is running"
+      kubernetes.core.k8s_info:
+        api_version: k8s.keycloak.org/v2alpha1
+        kind: Keycloak
+        name: keycloak
+        namespace: "{{ keycloak_namespace }}"
+      register: keycloak_final_check
+      failed_when:
+        - keycloak_final_check.resources | length == 0
+        - >-
+          keycloak_final_check.resources[0].status.conditions | default([])
+          | selectattr('type', 'equalto', 'Ready')
+          | selectattr('status', 'equalto', 'True')
+          | list | length == 0
+
+    - name: "Phase 9: Verify Vault is running"
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        name: vault-0
+        namespace: "{{ vault_namespace }}"
+      register: vault_final_check
+      failed_when:
+        - vault_final_check.resources | length == 0
+        - >-
+          vault_final_check.resources[0].status.conditions | default([])
+          | selectattr('type', 'equalto', 'Ready')
+          | selectattr('status', 'equalto', 'True')
+          | list | length == 0
+
+    - name: "Phase 9: Verify wristband keys exist"
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Secret
+        name: "{{ item.name }}"
+        namespace: "{{ item.namespace }}"
+      loop:
+        - name: wristband-signing-key
+          namespace: kuadrant-system
+        - name: wristband-public-key
+          namespace: mcp-system
+      register: wristband_secrets_check
+      failed_when: wristband_secrets_check.resources | length == 0
+
+    - name: "Phase 9: Verify MCPGatewayExtension has trustedHeadersKey"
+      kubernetes.core.k8s_info:
+        api_version: mcp.kuadrant.io/v1alpha1
+        kind: MCPGatewayExtension
+        name: mcp-gateway
+        namespace: mcp-system
+      register: mcp_extension_check
+      failed_when:
+        - mcp_extension_check.resources | length == 0
+        - mcp_extension_check.resources[0].spec.trustedHeadersKey.secretName != 'wristband-public-key'
+
+    - name: MCP Ecosystem setup complete
+      ansible.builtin.debug:
+        msg: >-
+          MCP Ecosystem is configured and ready.
+          Keycloak: {{ keycloak_url }}
+          Keycloak Realm: {{ keycloak_realm }}
+          Vault: http://vault.{{ vault_namespace }}.svc.cluster.local:8200
+          Vault Root Token: {{ vault_root_token }} (dev mode)
+          Wristband Keys: configured in kuadrant-system and mcp-system
+          AuthPolicy: mcp-gateway-auth applied to mcp-gateway

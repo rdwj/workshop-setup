@@ -1,0 +1,75 @@
+# Section 2 Prep: Admin Tasks for Users, Resources, Accelerators, and Workloads
+#
+# Run after site.yml. Creates the NVIDIA GPU HardwareProfile so students can
+# verify GPU accelerator configuration in Topic 4 without waiting for operator
+# installs. Also creates a test namespace for exercises.
+#
+# Note: Kueue resources (ResourceFlavor, ClusterQueue, LocalQueue) are NOT
+# applied here — students create those themselves in Topic 5 as a hands-on exercise.
+#
+# Usage: cd ansible && ansible-playbook section-2-prep.yml
+#
+- name: Prepare clusters for Section 2 — Admin Tasks
+  hosts: all
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      host: "{{ k8s_host }}"
+      api_key: "{{ k8s_api_key }}"
+      validate_certs: "{{ validate_certs }}"
+  vars:
+    manifest_base_dir: "{{ playbook_dir }}/.."
+    test_namespace: my-project
+
+  tasks:
+    - name: Create test namespace for exercises
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ test_namespace }}"
+            labels:
+              opendatahub.io/dashboard: "true"
+
+    - name: Apply NVIDIA GPU HardwareProfile
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ manifest_base_dir }}/exercises/hardware-profile-nvidia-gpu.yaml"
+
+    - name: Verify HardwareProfile is available
+      kubernetes.core.k8s_info:
+        api_version: infrastructure.opendatahub.io/v1
+        kind: HardwareProfile
+        name: nvidia-gpu
+        namespace: redhat-ods-applications
+      register: hp_check
+      until:
+        - hp_check.resources | length > 0
+      retries: 6
+      delay: 5
+
+    - name: Verify GPU node has nvidia.com/gpu capacity
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Node
+      register: gpu_verify
+      until:
+        - >-
+          gpu_verify.resources
+          | selectattr('status.capacity', 'defined')
+          | map(attribute='status.capacity')
+          | map('dict2items')
+          | flatten
+          | selectattr('key', 'equalto', 'nvidia.com/gpu')
+          | selectattr('value', 'ne', '0')
+          | list | length > 0
+      retries: 6
+      delay: 5
+
+    - name: Section 2 prep complete
+      ansible.builtin.debug:
+        msg: >-
+          HardwareProfile 'nvidia-gpu' created, GPU node verified,
+          test namespace '{{ test_namespace }}' ready. Ready for Section 2.

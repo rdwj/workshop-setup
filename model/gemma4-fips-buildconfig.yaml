@@ -1,0 +1,45 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gemma-build
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: vllm-gemma4-fips
+  namespace: gemma-build
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: vllm-gemma4-fips
+  namespace: gemma-build
+spec:
+  output:
+    to:
+      kind: ImageStreamTag
+      name: vllm-gemma4-fips:latest
+  source:
+    type: Dockerfile
+    dockerfile: |
+      FROM registry.redhat.io/rhaii-preview/vllm-cuda-rhel9:gemma4
+      USER 0
+      RUN pip uninstall -y opencv-python-headless && \
+          rm -rf /opt/vllm/lib/python3.12/site-packages/opencv_python_headless.libs/ && \
+          rm -rf /opt/vllm/lib/python3.12/site-packages/opencv_python_headless*
+      USER 2000
+  strategy:
+    type: Docker
+    dockerStrategy:
+      from:
+        kind: DockerImage
+        name: registry.redhat.io/rhaii-preview/vllm-cuda-rhel9:gemma4
+# After applying this manifest, start the build with:
+#   oc start-build vllm-gemma4-fips -n gemma-build --follow
+#
+# Then grant the serving namespace permission to pull the resulting image:
+#   oc policy add-role-to-user system:image-puller \
+#       system:serviceaccount:gemma-model:default -n gemma-build
+#   oc policy add-role-to-user system:image-puller \
+#       system:serviceaccount:gemma-model:gemma-sa -n gemma-build

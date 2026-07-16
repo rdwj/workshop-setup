@@ -1,0 +1,65 @@
+# Section 1 Prep: Managing Administration Tasks from the OpenShift AI Dashboard
+#
+# Run after site.yml. Creates a sample data science project with a running
+# workbench so students have something to manage in Topic 4.
+#
+# Usage: cd ansible && ansible-playbook section-1-prep.yml
+#
+- name: Prepare clusters for Section 1 — Dashboard Admin Tasks
+  hosts: all
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      host: "{{ k8s_host }}"
+      api_key: "{{ k8s_api_key }}"
+      validate_certs: "{{ validate_certs }}"
+  vars:
+    manifest_base_dir: "{{ playbook_dir }}/.."
+    workbench_namespace: sample-project
+    workbench_wait_retries: 40
+    workbench_wait_delay: 15
+
+  tasks:
+    - name: Create sample data science project
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ workbench_namespace }}"
+            labels:
+              opendatahub.io/dashboard: "true"
+
+    - name: Apply sample workbench manifest
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ doc }}"
+      loop: >-
+        {{
+          lookup('file', manifest_base_dir + '/exercises/sample-workbench.yaml')
+          | from_yaml_all
+          | select('ne', none)
+          | list
+        }}
+      loop_control:
+        loop_var: doc
+        label: "{{ doc.kind }}/{{ doc.metadata.name }}"
+
+    - name: Wait for sample workbench to be running
+      kubernetes.core.k8s_info:
+        api_version: kubeflow.org/v1
+        kind: Notebook
+        name: sample-workbench
+        namespace: "{{ workbench_namespace }}"
+      register: wb_check
+      until:
+        - wb_check.resources | length > 0
+        - wb_check.resources[0].status is defined
+        - wb_check.resources[0].status.readyReplicas | default(0) | int >= 1
+      retries: "{{ workbench_wait_retries | int }}"
+      delay: "{{ workbench_wait_delay | int }}"
+
+    - name: Section 1 prep complete
+      ansible.builtin.debug:
+        msg: "Sample workbench is running in {{ workbench_namespace }}. Ready for Section 1."

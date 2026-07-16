@@ -1,0 +1,37 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: finops-cost-model
+  namespace: finops
+  labels:
+    app: finops
+data:
+  cost-model.yaml: |
+    # FinOps Cost Model for OpenShift AI Workshop
+    # These rates are used in Prometheus recording rules to compute cost metrics.
+    #
+    # Self-hosted model costs are based on amortized GPU node cost.
+    # External model costs use actual API pricing.
+
+    self_hosted:
+      # AWS g6e.4xlarge: 1x NVIDIA L40S, 16 vCPU, 64 GB RAM
+      # On-demand price: ~$1.40/hr
+      gpu_node_cost_per_hour: 1.40
+      instance_type: g6e.4xlarge
+      gpu_type: L40S
+      gpu_count_per_node: 1
+
+    external:
+      # OpenAI GPT-4o pricing (as of 2025)
+      openai_gpt4o:
+        input_cost_per_1k_tokens: 0.0025
+        output_cost_per_1k_tokens: 0.010
+        cached_input_cost_per_1k_tokens: 0.00125
+      # Add other external models as needed
+
+    # Workshop note: Self-hosted cost-per-token is dynamic.
+    # It depends on actual throughput: cost_per_token = gpu_hour_cost / tokens_served_per_hour
+    # A GPU serving 10K tokens/hr costs $0.00014/token.
+    # A GPU serving 100K tokens/hr costs $0.000014/token.
+    # This is the key insight: utilization drives self-hosted economics.

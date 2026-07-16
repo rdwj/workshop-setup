@@ -1,0 +1,147 @@
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: judge-8x7b-baseline-cache
+  namespace: judge-model
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 200Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus-8x7b-baseline
+  namespace: judge-model
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: prometheus-8x7b-baseline
+  template:
+    metadata:
+      labels:
+        app: prometheus-8x7b-baseline
+    spec:
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest
+          args:
+            - --model
+            - prometheus-eval/prometheus-8x7b-v2.0
+            - --port
+            - "8000"
+            - --dtype
+            - bfloat16
+            - --max-model-len
+            - "32768"
+            - --tensor-parallel-size
+            - "4"
+            - --gpu-memory-utilization
+            - "0.9"
+            - --enable-prefix-caching
+            - --enable-prompt-tokens-details
+            - --enable-server-load-tracking
+          env:
+            - name: HOME
+              value: /tmp/home
+            - name: HF_HOME
+              value: /models/huggingface
+            - name: TRANSFORMERS_CACHE
+              value: /models/huggingface
+            - name: VLLM_CACHE_DIR
+              value: /models/vllm-cache
+            - name: XDG_CACHE_HOME
+              value: /tmp/cache
+          ports:
+            - containerPort: 8000
+          resources:
+            requests:
+              cpu: "8"
+              memory: 32Gi
+              nvidia.com/gpu: "4"
+            limits:
+              cpu: "16"
+              memory: 64Gi
+              nvidia.com/gpu: "4"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 300
+            periodSeconds: 15
+            failureThreshold: 40
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 300
+            periodSeconds: 30
+            failureThreshold: 10
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+            - name: shm
+              mountPath: /dev/shm
+            - name: tmp-cache
+              mountPath: /tmp/cache
+            - name: tmp-home
+              mountPath: /tmp/home
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: judge-8x7b-baseline-cache
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+        - name: tmp-cache
+          emptyDir: {}
+        - name: tmp-home
+          emptyDir: {}
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node.kubernetes.io/instance-type
+                    operator: In
+                    values:
+                      - g6e.12xlarge
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-8x7b-baseline
+  namespace: judge-model
+  labels:
+    app: prometheus-8x7b-baseline
+spec:
+  selector:
+    app: prometheus-8x7b-baseline
+  ports:
+    - port: 80
+      targetPort: 8000
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: prometheus-8x7b-baseline
+  namespace: judge-model
+spec:
+  to:
+    kind: Service
+    name: prometheus-8x7b-baseline
+  port:
+    targetPort: 8000
+  tls:
+    termination: edge

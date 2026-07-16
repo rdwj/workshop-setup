@@ -1,0 +1,280 @@
+# OGX (LlamaStack) + Kagenti Setup for RHOAI 3.4
+#
+# Enables the LlamaStack operator in the DataScienceCluster, deploys MinIO for
+# workshop S3 storage, and optionally deploys Kagenti for MCP Gateway + agent UI.
+#
+# This playbook:
+#   1. Deploys MinIO for workshop S3 storage (optional)
+#   2. Enables LlamaStack operator in the DSC
+#   3. Deploys Kagenti (optional — requires GHCR credentials + repo clone)
+#   4. Verifies LlamaStack CRDs and Kagenti components
+#
+# Prerequisites:
+#   - RHOAI 3.4 installed
+#   - DSC with llamastackoperator.managementState: Removed
+#
+# Usage:
+#   cd ansible && ansible-playbook ogx-setup.yml -i inventory/34-rhoai.yml
+#
+#   To deploy Kagenti (requires additional setup):
+#   cd ansible && ansible-playbook ogx-setup.yml -i inventory/34-rhoai.yml \
+#     -e deploy_kagenti=true \
+#     -e kagenti_repo_path=/path/to/kagenti
+#
+- name: OGX (LlamaStack) + Kagenti Setup for RHOAI 3.4
+  hosts: all
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      host: "{{ k8s_host }}"
+      api_key: "{{ k8s_api_key }}"
+      validate_certs: "{{ validate_certs }}"
+  vars:
+    manifest_base_dir: "{{ playbook_dir }}/.."
+    deploy_minio: true
+    deploy_kagenti: false
+    kagenti_repo_path: ""
+
+    # Retry/delay settings
+    minio_retries: 30
+    minio_delay: 10
+    dsc_retries: 40
+    dsc_delay: 15
+    llamastack_crd_retries: 30
+    llamastack_crd_delay: 10
+    kagenti_retries: 40
+    kagenti_delay: 15
+
+  tasks:
+    # =========================================================================
+    # Phase 1: Deploy MinIO (conditional on deploy_minio)
+    # =========================================================================
+
+    - name: "Phase 1: Deploy MinIO for workshop S3 storage"
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ doc }}"
+      loop: >-
+        {{
+          lookup('file', manifest_base_dir + '/ogx/minio.yaml')
+          | from_yaml_all
+          | select('ne', none)
+          | list
+        }}
+      loop_control:
+        loop_var: doc
+        label: "{{ doc.kind }}/{{ doc.metadata.name }}"
+      when: deploy_minio | bool
+
+    - name: "Phase 1: Wait for MinIO deployment to be available"
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: minio
+        namespace: minio
+      register: minio_deploy_check
+      until:
+        - minio_deploy_check.resources | length > 0
+        - minio_deploy_check.resources[0].status.readyReplicas | default(0) | int >= 1
+      retries: "{{ minio_retries | int }}"
+      delay: "{{ minio_delay | int }}"
+      when: deploy_minio | bool
+
+    - name: "Phase 1: Get MinIO console route URL"
+      kubernetes.core.k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        name: minio-console
+        namespace: minio
+      register: minio_route
+      when: deploy_minio | bool
+
+    - name: "Phase 1: Print MinIO console URL"
+      ansible.builtin.debug:
+        msg: "MinIO console: https://{{ minio_route.resources[0].spec.host }}"
+      when:
+        - deploy_minio | bool
+        - minio_route.resources | length > 0
+
+    # =========================================================================
+    # Phase 2: Enable LlamaStack Operator in DSC
+    # =========================================================================
+
+    - name: "Phase 2: Patch DSC to set llamastackoperator to Managed"
+      kubernetes.core.k8s:
+        api_version: datasciencecluster.opendatahub.io/v1
+        kind: DataScienceCluster
+        name: default-dsc
+        definition:
+          spec:
+            components:
+              llamastackoperator:
+                managementState: Managed
+        merge_type: merge
+
+    - name: "Phase 2: Wait for DSC to return to Ready"
+      kubernetes.core.k8s_info:
+        api_version: datasciencecluster.opendatahub.io/v1
+        kind: DataScienceCluster
+        name: default-dsc
+      register: dsc_status
+      until:
+        - dsc_status.resources | default([]) | length > 0
+        - >-
+          dsc_status.resources[0].status.conditions | default([])
+          | selectattr('type', 'equalto', 'Ready')
+          | selectattr('status', 'equalto', 'True')
+          | list | length > 0
+      retries: "{{ dsc_retries | int }}"
+      delay: "{{ dsc_delay | int }}"
+
+    - name: "Phase 2: Check for LlamaStack CRDs"
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+      register: all_crds
+
+    - name: "Phase 2: Wait for LlamaStack CRDs to appear"
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+      register: all_crds_check
+      until:
+        - all_crds_check.resources | map(attribute='metadata.name') | select('search', 'llamastack') | list | length > 0
+      retries: "{{ llamastack_crd_retries | int }}"
+      delay: "{{ llamastack_crd_delay | int }}"
+
+    - name: "Phase 2: Print LlamaStack CRDs"
+      ansible.builtin.debug:
+        msg: "LlamaStack CRDs: {{ all_crds_check.resources | map(attribute='metadata.name') | select('search', 'llamastack') | list | join(', ') }}"
+
+    # =========================================================================
+    # Phase 3: Deploy Kagenti (conditional on deploy_kagenti)
+    # =========================================================================
+
+    - name: "Phase 3: Verify kagenti_repo_path is set"
+      ansible.builtin.fail:
+        msg: "deploy_kagenti is true but kagenti_repo_path is not set. Pass -e kagenti_repo_path=/path/to/kagenti"
+      when:
+        - deploy_kagenti | bool
+        - kagenti_repo_path | length == 0
+
+    - name: "Phase 3: Check if deploy-kagenti.sh exists"
+      ansible.builtin.stat:
+        path: "{{ manifest_base_dir }}/deploy-kagenti.sh"
+      register: kagenti_script
+      when: deploy_kagenti | bool
+
+    - name: "Phase 3: Fail if deploy-kagenti.sh not found"
+      ansible.builtin.fail:
+        msg: "deploy-kagenti.sh not found at {{ manifest_base_dir }}/deploy-kagenti.sh"
+      when:
+        - deploy_kagenti | bool
+        - not kagenti_script.stat.exists
+
+    - name: "Phase 3: Run deploy-kagenti.sh"
+      ansible.builtin.shell:
+        cmd: "{{ manifest_base_dir }}/deploy-kagenti.sh {{ kagenti_repo_path }}"
+        chdir: "{{ manifest_base_dir }}"
+      register: kagenti_deploy_result
+      when: deploy_kagenti | bool
+
+    - name: "Phase 3: Print deploy-kagenti.sh output"
+      ansible.builtin.debug:
+        var: kagenti_deploy_result.stdout_lines
+      when: deploy_kagenti | bool
+
+    - name: "Phase 3: Wait for Kagenti namespace to exist"
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        name: kagenti-system
+      register: kagenti_ns_check
+      until:
+        - kagenti_ns_check.resources | default([]) | length > 0
+      retries: "{{ kagenti_retries | int }}"
+      delay: "{{ kagenti_delay | int }}"
+      when: deploy_kagenti | bool
+
+    - name: "Phase 3: Wait for Kagenti pods to come up"
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: kagenti-system
+      register: kagenti_pods
+      until:
+        - kagenti_pods.resources | default([]) | length > 0
+        - >-
+          kagenti_pods.resources
+          | selectattr('status.phase', 'defined')
+          | selectattr('status.phase', 'equalto', 'Running')
+          | list | length > 0
+      retries: "{{ kagenti_retries | int }}"
+      delay: "{{ kagenti_delay | int }}"
+      when: deploy_kagenti | bool
+
+    - name: "Phase 3: Get Kagenti UI route"
+      kubernetes.core.k8s_info:
+        api_version: route.openshift.io/v1
+        kind: Route
+        namespace: kagenti-system
+      register: kagenti_routes
+      when: deploy_kagenti | bool
+
+    - name: "Phase 3: Print Kagenti UI URL"
+      ansible.builtin.debug:
+        msg: >-
+          Kagenti UI: https://{{
+            (kagenti_routes.resources
+            | selectattr('metadata.name', 'search', 'kagenti-ui')
+            | map(attribute='spec.host')
+            | first) if (kagenti_routes.resources | selectattr('metadata.name', 'search', 'kagenti-ui') | list | length > 0)
+            else 'route not found'
+          }}
+      when: deploy_kagenti | bool
+
+    # =========================================================================
+    # Phase 4: Verify
+    # =========================================================================
+
+    - name: "Phase 4: Verify LlamaStack CRDs exist"
+      ansible.builtin.assert:
+        that:
+          - all_crds_check.resources | map(attribute='metadata.name') | select('search', 'llamastack') | list | length > 0
+        fail_msg: "No LlamaStack CRDs found. DSC LlamaStack enablement may have failed."
+        success_msg: "LlamaStack CRDs detected."
+
+    - name: "Phase 4: Verify MinIO is running"
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        name: minio
+        namespace: minio
+      register: minio_final_check
+      when: deploy_minio | bool
+
+    - name: "Phase 4: MinIO status"
+      ansible.builtin.debug:
+        msg: "MinIO deployment ready replicas: {{ minio_final_check.resources[0].status.readyReplicas | default(0) }}"
+      when: deploy_minio | bool
+
+    - name: "Phase 4: Verify Kagenti pods are running"
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: kagenti-system
+      register: kagenti_final_check
+      when: deploy_kagenti | bool
+
+    - name: "Phase 4: Kagenti pod count"
+      ansible.builtin.debug:
+        msg: "Kagenti running pods: {{ (kagenti_final_check.resources | selectattr('status.phase', 'equalto', 'Running') | list | length) if deploy_kagenti | bool else 0 }}"
+      when: deploy_kagenti | bool
+
+    - name: OGX setup complete
+      ansible.builtin.debug:
+        msg: >-
+          OGX (LlamaStack) setup complete.
+          LlamaStack operator: Enabled in DSC
+          MinIO: {{ 'Deployed (minio namespace)' if (deploy_minio | bool) else 'Skipped' }}
+          Kagenti: {{ 'Deployed (kagenti-system namespace)' if (deploy_kagenti | bool) else 'Skipped' }}

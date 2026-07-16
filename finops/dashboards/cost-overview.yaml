@@ -1,0 +1,183 @@
+---
+apiVersion: perses.dev/v1alpha2
+kind: PersesDashboard
+metadata:
+  name: finops-cost-overview
+  namespace: finops
+  labels:
+    app: finops
+spec:
+  config:
+    display:
+      name: "FinOps Cost Overview"
+    duration: "1h"
+    variables: []
+    panels:
+      total-hourly-spend:
+        kind: "Panel"
+        spec:
+          display:
+            name: "Total Hourly Spend ($)"
+          plugin:
+            kind: StatChart
+            spec:
+              queries:
+                - spec:
+                    plugin:
+                      kind: PrometheusTimeSeriesQuery
+                      spec:
+                        datasource:
+                          kind: PrometheusDatasource
+                          name: thanos-querier
+                        query: "sum(finops:gpu_cost_per_hour)"
+      estimated-daily-spend:
+        kind: "Panel"
+        spec:
+          display:
+            name: "Estimated Daily Spend ($)"
+          plugin:
+            kind: StatChart
+            spec:
+              queries:
+                - spec:
+                    plugin:
+                      kind: PrometheusTimeSeriesQuery
+                      spec:
+                        datasource:
+                          kind: PrometheusDatasource
+                          name: thanos-querier
+                        query: "sum(finops:estimated_daily_cost)"
+      cost-by-model:
+        kind: "Panel"
+        spec:
+          display:
+            name: "Cost by Model ($/hr)"
+          plugin:
+            kind: BarChart
+            spec:
+              queries:
+                - spec:
+                    plugin:
+                      kind: PrometheusTimeSeriesQuery
+                      spec:
+                        datasource:
+                          kind: PrometheusDatasource
+                          name: thanos-querier
+                        query: "finops:gpu_cost_per_hour"
+      cost-trend:
+        kind: "Panel"
+        spec:
+          display:
+            name: "Cost Trend Over Time"
+          plugin:
+            kind: TimeSeriesChart
+            spec:
+              queries:
+                - spec:
+                    plugin:
+                      kind: PrometheusTimeSeriesQuery
+                      spec:
+                        datasource:
+                          kind: PrometheusDatasource
+                          name: thanos-querier
+                        query: "finops:gpu_cost_per_hour"
+      self-hosted-vs-external:
+        kind: "Panel"
+        spec:
+          display:
+            name: "Self-Hosted vs External API Cost"
+          plugin:
+            kind: TimeSeriesChart
+            spec:
+              queries:
+                - spec:
+                    plugin:
+                      kind: PrometheusTimeSeriesQuery
+                      spec:
+                        datasource:
+                          kind: PrometheusDatasource
+                          name: thanos-querier
+                        query: "sum(finops:gpu_cost_per_hour)"
+                - spec:
+                    plugin:
+                      kind: PrometheusTimeSeriesQuery
+                      spec:
+                        datasource:
+                          kind: PrometheusDatasource
+                          name: thanos-querier
+                        query: "sum(rate(vllm:generation_tokens_total[5m])) * 3600 * 0.010 / 1000"
+      cost-per-1k-tokens:
+        kind: "Panel"
+        spec:
+          display:
+            name: "Cost per 1K Tokens"
+          plugin:
+            kind: TimeSeriesChart
+            spec:
+              queries:
+                - spec:
+                    plugin:
+                      kind: PrometheusTimeSeriesQuery
+                      spec:
+                        datasource:
+                          kind: PrometheusDatasource
+                          name: thanos-querier
+                        query: "finops:self_hosted_cost_per_1k_tokens"
+    layouts:
+      - kind: "Grid"
+        spec:
+          display:
+            title: "Current Spending"
+            collapse:
+              open: true
+          items:
+            - x: 0
+              y: 0
+              width: 12
+              height: 6
+              content:
+                $ref: "#/spec/config/panels/total-hourly-spend"
+            - x: 12
+              y: 0
+              width: 12
+              height: 6
+              content:
+                $ref: "#/spec/config/panels/estimated-daily-spend"
+      - kind: "Grid"
+        spec:
+          display:
+            title: "Cost Breakdown"
+            collapse:
+              open: true
+          items:
+            - x: 0
+              y: 0
+              width: 12
+              height: 8
+              content:
+                $ref: "#/spec/config/panels/cost-by-model"
+            - x: 12
+              y: 0
+              width: 12
+              height: 8
+              content:
+                $ref: "#/spec/config/panels/cost-trend"
+      - kind: "Grid"
+        spec:
+          display:
+            title: "Cost Analysis"
+            collapse:
+              open: true
+          items:
+            - x: 0
+              y: 0
+              width: 12
+              height: 8
+              content:
+                $ref: "#/spec/config/panels/self-hosted-vs-external"
+            - x: 12
+              y: 0
+              width: 12
+              height: 8
+              content:
+                $ref: "#/spec/config/panels/cost-per-1k-tokens"

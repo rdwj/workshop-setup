@@ -1,0 +1,304 @@
+# Gateway Infrastructure for RHOAI 3.4
+#
+# Shared base playbook that provides Gateway API infrastructure used by both
+# MaaS (maas-setup.yml) and MCP (mcp-setup.yml) playbooks.
+#
+# This playbook provides:
+#   - User workload monitoring (ConfigMap in openshift-monitoring)
+#   - Red Hat Connectivity Link (RHCL) Operator installation
+#   - Kuadrant namespace and Kuadrant CR
+#   - GatewayClass (from RHCL / Service Mesh 3) verified and available
+#   - Kuadrant CRDs (AuthPolicy, RateLimitPolicy, etc.)
+#
+# Both maas-setup.yml and mcp-setup.yml depend on the GatewayClass and
+# Kuadrant CRDs that this playbook creates. Run this first.
+#
+# Prerequisites:
+#   - RHOAI 3.4 installed with Authorino v1.3.0
+#   - cert-manager v1.19.0
+#   - Service Mesh 3 v3.1.0
+#
+# Usage: cd ansible && ansible-playbook gateway-infrastructure.yml -i inventory/34-rhoai.yml
+#
+- name: Gateway Infrastructure for RHOAI 3.4
+  hosts: all
+  gather_facts: false
+  module_defaults:
+    group/kubernetes.core.k8s:
+      host: "{{ k8s_host }}"
+      api_key: "{{ k8s_api_key }}"
+      validate_certs: "{{ validate_certs }}"
+  vars:
+    manifest_base_dir: "{{ playbook_dir }}/.."
+    rhcl_csv_name: "rhcl-operator.v1.3.4"
+
+    # Retry/delay settings
+    rhcl_installplan_retries: 30
+    rhcl_installplan_delay: 10
+    rhcl_csv_retries: 40
+    rhcl_csv_delay: 15
+    kuadrant_retries: 40
+    kuadrant_delay: 15
+
+  tasks:
+    # =========================================================================
+    # Phase 1: User Workload Monitoring
+    # =========================================================================
+
+    - name: "Phase 1: Enable user workload monitoring"
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ doc }}"
+      loop: >-
+        {{
+          lookup('file', manifest_base_dir + '/maas/user-workload-monitoring.yaml')
+          | from_yaml_all
+          | select('ne', none)
+          | list
+        }}
+      loop_control:
+        loop_var: doc
+        label: "{{ doc.kind }}/{{ doc.metadata.name }}"
+
+    - name: "Phase 1: Verify cluster-monitoring-config exists"
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: ConfigMap
+        name: cluster-monitoring-config
+        namespace: openshift-monitoring
+      register: monitoring_cm
+      failed_when: monitoring_cm.resources | length == 0
+
+    # =========================================================================
+    # Phase 2: Install RHCL Operator
+    # =========================================================================
+
+    - name: "Phase 2: Apply RHCL operator Subscription"
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ doc }}"
+      loop: >-
+        {{
+          lookup('file', manifest_base_dir + '/maas/rhcl-operator.yaml')
+          | from_yaml_all
+          | select('ne', none)
+          | list
+        }}
+      loop_control:
+        loop_var: doc
+        label: "{{ doc.kind }}/{{ doc.metadata.name }}"
+
+    - name: "Phase 2: Check if RHCL CSV already succeeded"
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        name: "{{ rhcl_csv_name }}"
+        namespace: openshift-operators
+      register: rhcl_csv_precheck
+
+    - name: "Phase 2: Set RHCL CSV already-succeeded flag"
+      ansible.builtin.set_fact:
+        rhcl_csv_already_succeeded: >-
+          {{
+            rhcl_csv_precheck.resources | default([])
+            | selectattr('status.phase', 'defined')
+            | selectattr('status.phase', 'equalto', 'Succeeded')
+            | list | length > 0
+          }}
+
+    - name: "Phase 2: Wait for RHCL InstallPlan"
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: InstallPlan
+        namespace: openshift-operators
+      register: rhcl_installplan_result
+      until:
+        - >-
+          rhcl_installplan_result.resources
+          | selectattr('spec.approved', 'equalto', false)
+          | selectattr('spec.clusterServiceVersionNames', 'defined')
+          | selectattr('spec.clusterServiceVersionNames', 'contains', rhcl_csv_name)
+          | list | length > 0
+      retries: "{{ rhcl_installplan_retries | int }}"
+      delay: "{{ rhcl_installplan_delay | int }}"
+      when: not rhcl_csv_already_succeeded | bool
+
+    - name: "Phase 2: Identify unapproved RHCL InstallPlan"
+      ansible.builtin.set_fact:
+        rhcl_unapproved_plan: >-
+          {{
+            rhcl_installplan_result.resources
+            | selectattr('spec.approved', 'equalto', false)
+            | selectattr('spec.clusterServiceVersionNames', 'defined')
+            | selectattr('spec.clusterServiceVersionNames', 'contains', rhcl_csv_name)
+            | map(attribute='metadata.name')
+            | first
+          }}
+      when: not rhcl_csv_already_succeeded | bool
+
+    - name: "Phase 2: Approve RHCL InstallPlan {{ rhcl_unapproved_plan | default('N/A') }}"
+      kubernetes.core.k8s:
+        api_version: operators.coreos.com/v1alpha1
+        kind: InstallPlan
+        name: "{{ rhcl_unapproved_plan }}"
+        namespace: openshift-operators
+        definition:
+          spec:
+            approved: true
+        merge_type: merge
+      when: not rhcl_csv_already_succeeded | bool
+
+    - name: "Phase 2: RHCL already installed, skipping InstallPlan approval"
+      ansible.builtin.debug:
+        msg: "RHCL CSV {{ rhcl_csv_name }} already Succeeded, skipping InstallPlan approval"
+      when: rhcl_csv_already_succeeded | bool
+
+    - name: "Phase 2: Wait for RHCL CSV to succeed"
+      kubernetes.core.k8s_info:
+        api_version: operators.coreos.com/v1alpha1
+        kind: ClusterServiceVersion
+        name: "{{ rhcl_csv_name }}"
+        namespace: openshift-operators
+      register: rhcl_csv
+      until:
+        - rhcl_csv.resources | default([]) | length > 0
+        - (rhcl_csv.resources | default([{}]))[0].status.phase | default('') == 'Succeeded'
+      retries: "{{ rhcl_csv_retries | int }}"
+      delay: "{{ rhcl_csv_delay | int }}"
+
+    # =========================================================================
+    # Phase 3: Create Kuadrant CR
+    # =========================================================================
+
+    - name: "Phase 3: Create kuadrant-system namespace"
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ doc }}"
+      loop: >-
+        {{
+          lookup('file', manifest_base_dir + '/maas/kuadrant-namespace.yaml')
+          | from_yaml_all
+          | select('ne', none)
+          | list
+        }}
+      loop_control:
+        loop_var: doc
+        label: "{{ doc.kind }}/{{ doc.metadata.name }}"
+
+    - name: "Phase 3: Apply Kuadrant CR"
+      kubernetes.core.k8s:
+        state: present
+        definition: "{{ doc }}"
+      loop: >-
+        {{
+          lookup('file', manifest_base_dir + '/maas/kuadrant-cr.yaml')
+          | from_yaml_all
+          | select('ne', none)
+          | list
+        }}
+      loop_control:
+        loop_var: doc
+        label: "{{ doc.kind }}/{{ doc.metadata.name }}"
+
+    - name: "Phase 3: Wait for Kuadrant to become Ready"
+      kubernetes.core.k8s_info:
+        api_version: kuadrant.io/v1beta1
+        kind: Kuadrant
+        name: kuadrant
+        namespace: kuadrant-system
+      register: kuadrant_first_wait
+      until:
+        - kuadrant_first_wait.resources | default([]) | length > 0
+        - >-
+          kuadrant_first_wait.resources[0].status.conditions | default([])
+          | selectattr('type', 'equalto', 'Ready')
+          | selectattr('status', 'equalto', 'True')
+          | list | length > 0
+      retries: "{{ kuadrant_retries | int }}"
+      delay: "{{ kuadrant_delay | int }}"
+      ignore_errors: true
+
+    # --- MissingDependency race condition workaround ---
+    # The Kuadrant operator can get stuck in MissingDependency state if it
+    # starts before RHCL CRDs are fully registered. Restarting the operator
+    # pod forces a re-check and resolves the race.
+
+    - name: "Phase 3: Restart Kuadrant operator if stuck on MissingDependency"
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: openshift-operators
+        label_selectors:
+          - app.kubernetes.io/name=kuadrant-operator
+      register: kuadrant_deploy
+      when: kuadrant_first_wait is failed
+
+    - name: "Phase 3: Delete Kuadrant operator pod to re-check dependencies"
+      kubernetes.core.k8s:
+        api_version: v1
+        kind: Pod
+        namespace: openshift-operators
+        name: "{{ item.metadata.name }}"
+        state: absent
+      loop: "{{ lookup('kubernetes.core.k8s', api_version='v1', kind='Pod', namespace='openshift-operators', label_selector='app.kubernetes.io/name=kuadrant-operator') }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
+      when: kuadrant_first_wait is failed
+
+    - name: "Phase 3: Wait for Kuadrant operator pod to restart"
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: openshift-operators
+        label_selectors:
+          - app.kubernetes.io/name=kuadrant-operator
+      register: kuadrant_operator_check
+      until:
+        - kuadrant_operator_check.resources | length > 0
+        - kuadrant_operator_check.resources[0].status.readyReplicas | default(0) | int >= 1
+      retries: 20
+      delay: 10
+      when: kuadrant_first_wait is failed
+
+    - name: "Phase 3: Re-check Kuadrant readiness after operator restart"
+      kubernetes.core.k8s_info:
+        api_version: kuadrant.io/v1beta1
+        kind: Kuadrant
+        name: kuadrant
+        namespace: kuadrant-system
+      register: kuadrant_status_retry
+      until:
+        - kuadrant_status_retry.resources | default([]) | length > 0
+        - >-
+          kuadrant_status_retry.resources[0].status.conditions | default([])
+          | selectattr('type', 'equalto', 'Ready')
+          | selectattr('status', 'equalto', 'True')
+          | list | length > 0
+      retries: "{{ kuadrant_retries | int }}"
+      delay: "{{ kuadrant_delay | int }}"
+      when: kuadrant_first_wait is failed
+
+    # =========================================================================
+    # Phase 4: Verify GatewayClass
+    # =========================================================================
+
+    - name: "Phase 4: Verify GatewayClass is available"
+      kubernetes.core.k8s_info:
+        api_version: gateway.networking.k8s.io/v1
+        kind: GatewayClass
+      register: gateway_classes
+
+    - name: "Phase 4: Assert at least one GatewayClass exists"
+      ansible.builtin.assert:
+        that:
+          - gateway_classes.resources | length > 0
+        fail_msg: "No GatewayClass found. RHCL / Service Mesh 3 may not have installed correctly."
+        success_msg: "GatewayClass available: {{ gateway_classes.resources | map(attribute='metadata.name') | list | join(', ') }}"
+
+    - name: Gateway infrastructure ready
+      ansible.builtin.debug:
+        msg: >-
+          Gateway infrastructure is ready.
+          RHCL Operator: {{ rhcl_csv_name }} (Succeeded)
+          Kuadrant: kuadrant-system/kuadrant (Ready)
+          GatewayClass: {{ gateway_classes.resources | map(attribute='metadata.name') | list | join(', ') }}
