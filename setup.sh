@@ -117,10 +117,20 @@ wait_for "RHOAI operator Succeeded in redhat-ods-operator" "$CSV_TIMEOUT" 15 \
 wait_for "Web Terminal operator Succeeded" "$CSV_TIMEOUT" 15 \
   ''$OC' get csv -n openshift-operators --no-headers 2>/dev/null | grep "web-terminal" | grep -q "Succeeded"'
 
-# --- Apply operands ---
-$OC apply -f operands/
+# --- Apply core operands (NFD + DSC only) ---
+# The remaining operands (OdhDashboardConfig, model ServingRuntimes) depend on
+# CRDs that only exist after the DataScienceCluster is fully reconciled.
+$OC apply -f operands/nfd-instance.yaml
 
-# --- Checkpoint 3: Verify operands ---
+# Pick the DSC manifest matching the RHOAI channel.
+DSC_MANIFEST="operands/datasciencecluster-3.4.yaml"
+if [ ! -f "$DSC_MANIFEST" ]; then
+  # Fall back to whatever DSC manifest exists.
+  DSC_MANIFEST=$(ls operands/datasciencecluster-*.yaml 2>/dev/null | sort -V | tail -1)
+fi
+$OC apply -f "$DSC_MANIFEST"
+
+# --- Checkpoint 3: Verify core operands ---
 wait_for "NFD instance Available" "$NFD_TIMEOUT" 15 \
   '[ "$('$OC' get nodefeaturediscovery nfd-instance -n openshift-nfd -o jsonpath="{.status.conditions[?(@.type==\"Available\")].status}" 2>/dev/null)" = "True" ]'
 
@@ -129,6 +139,18 @@ wait_for "NFD labels present on nodes" "$NFD_TIMEOUT" 15 \
 
 wait_for "DataScienceCluster default-dsc Ready" "$DSC_TIMEOUT" 15 \
   '[ "$('$OC' get datasciencecluster default-dsc -o jsonpath="{.status.conditions[?(@.type==\"Ready\")].status}" 2>/dev/null)" = "True" ]'
+
+# --- Apply remaining operands (depend on CRDs from DSC) ---
+# These are optional and may fail if the cluster doesn't have KServe configured.
+for f in operands/odhdashboardconfig.yaml operands/gpt-oss-20b-deployment.yaml; do
+  if [ -f "$f" ]; then
+    if $OC apply -f "$f" 2>/dev/null; then
+      echo "  Applied $(basename "$f")"
+    else
+      echo "  Skipped $(basename "$f") (CRD not available yet -- apply manually after DSC stabilizes)"
+    fi
+  fi
+done
 
 # --- Apply GPU operand ---
 $OC apply -f gpu-operand/
