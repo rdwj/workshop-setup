@@ -30,6 +30,9 @@
       validate_certs: "{{ validate_certs }}"
   vars:
     manifest_base_dir: "{{ playbook_dir }}/.."
+    maas_db_user: "maasadmin"
+    maas_db_password: ""
+    maas_db_name: "maasdb"
     maas_deploy_postgres: true
     maas_db_connection_url: ""
     maas_gateway_class: ""
@@ -46,6 +49,29 @@
     # =========================================================================
     # Phase 1: Deploy PostgreSQL (conditional)
     # =========================================================================
+
+    - name: "Validate required variables"
+      ansible.builtin.assert:
+        that:
+          - maas_db_password | length > 0
+        fail_msg: "maas_db_password must be set. Pass it via -e maas_db_password=YOUR_PASSWORD"
+      when: maas_deploy_postgres | bool
+
+    - name: "Phase 1: Create PostgreSQL credentials secret"
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: maas-postgresql-credentials
+            namespace: maas-postgresql
+          type: Opaque
+          stringData:
+            POSTGRES_USER: "{{ maas_db_user }}"
+            POSTGRES_PASSWORD: "{{ maas_db_password }}"
+            POSTGRES_DB: "{{ maas_db_name }}"
+      when: maas_deploy_postgres | bool
 
     - name: "Phase 1: Deploy in-cluster PostgreSQL"
       kubernetes.core.k8s:
@@ -79,7 +105,7 @@
 
     - name: "Phase 1: Set DB connection URL for in-cluster PostgreSQL"
       ansible.builtin.set_fact:
-        maas_db_url: "postgresql://maasadmin:REDACTED_PASSWORD@maas-postgresql.maas-postgresql.svc:5432/maasdb"
+        maas_db_url: "postgresql://{{ maas_db_user }}:{{ maas_db_password }}@maas-postgresql.maas-postgresql.svc:5432/{{ maas_db_name }}"
       when: maas_deploy_postgres | bool
 
     - name: "Phase 1: Set DB connection URL from variable"

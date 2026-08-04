@@ -16,16 +16,6 @@ spec:
     requests:
       storage: 20Gi
 ---
-apiVersion: v1
-kind: Secret
-metadata:
-  name: minio-credentials
-  namespace: minio
-type: Opaque
-stringData:
-  MINIO_ROOT_USER: minioadmin
-  MINIO_ROOT_PASSWORD: REDACTED_PASSWORD
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:

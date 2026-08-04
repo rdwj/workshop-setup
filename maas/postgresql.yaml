@@ -15,17 +15,6 @@ spec:
     requests:
       storage: 5Gi
 ---
-apiVersion: v1
-kind: Secret
-metadata:
-  name: maas-postgresql-credentials
-  namespace: maas-postgresql
-type: Opaque
-stringData:
-  POSTGRES_USER: maasadmin
-  POSTGRES_PASSWORD: REDACTED_PASSWORD
-  POSTGRES_DB: maasdb
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:

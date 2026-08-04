@@ -6,4 +6,4 @@ all:
   hosts:
     finops-research-001:
       k8s_host: "https://api.cluster-9jfks.9jfks.sandbox366.opentlc.com:6443"
-      k8s_api_key: "sha256~REDACTED_TOKEN"
+      k8s_api_key: "sha256~REPLACE_WITH_YOUR_TOKEN"

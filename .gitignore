@@ -7,7 +7,9 @@ ansible/inventory/fips-rhoai.yml
 ansible/inventory/mcp-rhoai.yml
 ansible/inventory/34-rhoai.yml
 ansible/inventory/re-test-full-deployment.yml
+ansible/inventory/finops-research.yml
 auth/htpasswd-secret.yaml
+*.zip
 
 # Model quantization (contains HF token)
 model/quantize-prometheus-8x7b.yaml

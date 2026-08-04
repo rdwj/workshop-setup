@@ -9,7 +9,7 @@ GATEWAY_SVC="mcp-gateway-istio.gateway-system.svc.cluster.local:8080"
 HOST_HEADER="mcp.mcp.local"
 KEYCLOAK_URL="https://keycloak-keycloak.apps.cluster-n7pd5.n7pd5.sandbox5167.opentlc.com/realms/mcp-gateway/protocol/openid-connect/token"
 CLIENT_ID="mcp-gateway"
-CLIENT_SECRET="REDACTED_CLIENT_SECRET"
+CLIENT_SECRET="${MCP_CLIENT_SECRET:?Set MCP_CLIENT_SECRET environment variable}"
 
 echo "=== MCP Gateway JWT Enforcement Test Suite ==="
 echo ""

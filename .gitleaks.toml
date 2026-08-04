@@ -1,6 +1,23 @@
+title = "workshop-setup gitleaks config"
+
 [allowlist]
-description = "Known pre-existing secrets in git history"
+description = "Known non-sensitive patterns"
 paths = [
   '''auth/htpasswd-secret\.yaml''',
   '''model/quantize-prometheus-8x7b\.yaml''',
 ]
+
+[[rules]]
+id = "openshift-token"
+description = "OpenShift API Token"
+regex = '''sha256~[A-Za-z0-9_-]{32,}'''
+tags = ["openshift", "token"]
+
+[[rules]]
+id = "k8s-secret-stringdata"
+description = "Kubernetes Secret with stringData passwords"
+regex = '''POSTGRES_PASSWORD:\s*\S+|MINIO_ROOT_PASSWORD:\s*\S+'''
+tags = ["kubernetes", "password"]
+[rules.allowlist]
+regexTarget = "match"
+regexes = ['''\$\{.*\}''', '''CHANGEME''', '''REPLACE''']
