@@ -36,3 +36,6 @@ site/
 
 # Compiled Wasm binaries
 *.wasm
+
+# Added by ggshield
+.cache_ggshield
