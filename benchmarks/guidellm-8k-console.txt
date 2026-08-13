@@ -1,0 +1,36 @@
+# GuideLLM Benchmark: 8K context, 2 concurrent streams
+# Model: RedHatAI/gpt-oss-120b-essential on g6e.12xlarge (4x L40S)
+# Endpoint: /v1/completions (direct route, no auth proxy)
+# Date: 2026-08-13
+
+Backend: openai_http, target=http://gpt-oss-120b-direct.gpt-oss-120b-model.svc:8080
+Tokenizer: RedHatAI/gpt-oss-120b-essential
+Profile: concurrent, streams=2
+Data: synthetic_text, prompt_tokens=8000, output_tokens=2000
+Constraint: max_requests=4 (completed in 206.4s)
+
+Run Summary:
+  Completed: 4 requests, 0 errors
+  Input tokens: 32,004 total
+  Output tokens: 8,000 total
+
+Request Latency:
+  Median: 97.4s
+  p95:    109.1s
+
+TTFT (Time to First Token):
+  Median: 1,389ms
+  p95:    2,516ms
+
+ITL (Inter-Token Latency):
+  Median: 48.0ms
+  p95:    53.3ms
+
+TPOT (Time Per Output Token):
+  Median: 48.7ms
+  p95:    54.5ms
+
+Server Throughput:
+  Input:  391.2 tok/s
+  Output: 27.9 tok/s (total across 2 streams)
+  Concurrency: 1.8 median

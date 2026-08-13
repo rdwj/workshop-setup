@@ -1,0 +1,43 @@
+=== BENCHMARK 2: 200K CONTEXT TEST ===
+Configuration:
+- Prompt tokens: 196,000
+- Output tokens: 8,000
+- Total tokens per request: 204,000
+- Concurrent streams: 2
+- Duration: 600 seconds (10 minutes)
+- Request format: /v1/completions
+- Model: RedHatAI/gpt-oss-120b-essential
+- vLLM max-model-len: 204,800 (updated from 131,072)
+
+STATUS: FAILED - All requests rejected with 400 Bad Request errors
+
+ERROR METRICS:
+- Completed Requests: 0
+- Failed Requests: Approximately 29,410 requests attempted
+- Error Token Count: 115,640,000 tokens (sum of all failed request sizes)
+- Generated Requests: Estimated ~1 request generated before system rejected
+- Input tokens processed before failure: 193,045.9 tokens/sec (reading phase only)
+- Output tokens generated: 0
+
+ROOT CAUSE ANALYSIS:
+- All requests returned HTTP 400 Bad Request errors
+- Errors began immediately upon benchmark start
+- vLLM pod remained running with no crashes
+- Issue appears to be context length validation, not OOM or model crash
+
+HYPOTHESIS:
+Despite updating vLLM's max-model-len to 204,800 and setting VLLM_ALLOW_LONG_MAX_MODEL_LEN=1,
+the gpt-oss-120b model may have hard limits based on:
+1. Model weights may not support >131K context despite vLLM config
+2. Tokenizer validation may be rejecting 196K token sequences
+3. Some validation layer between HTTP API and vLLM may enforce original limit
+4. Attention mechanism may still be hard-limited to original max_position_embeddings
+
+STATUS: Unable to validate 200K context window at this time
+
+NEXT STEPS (Recommended):
+1. Verify actual model config with: oc exec <pod> -- python3 -c "from transformers import AutoConfig; print(AutoConfig.from_pretrained('RedHatAI/gpt-oss-120b-essential').max_position_embeddings)"
+2. Check if model weights have position embeddings >131K
+3. Try intermediate value (e.g., 150K prompt) to find actual limit
+4. Review vLLM startup logs to confirm new max-model-len was loaded
+5. May need to quantize or fine-tune model for longer contexts

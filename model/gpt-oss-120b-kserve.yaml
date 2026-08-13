@@ -1,0 +1,107 @@
+# Deploys RedHatAI/gpt-oss-120b on OpenShift via KServe with TP=8.
+# Single replica using all 8 GPUs of a p4d.24xlarge (8x A100 40GB).
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gpt-oss-120b-model
+  labels:
+    opendatahub.io/dashboard: "true"
+---
+apiVersion: serving.kserve.io/v1alpha1
+kind: ServingRuntime
+metadata:
+  name: vllm-gpt-oss-120b-runtime
+  namespace: gpt-oss-120b-model
+  labels:
+    opendatahub.io/dashboard: "true"
+  annotations:
+    opendatahub.io/apiProtocol: REST
+    opendatahub.io/template-display-name: "vLLM GPT-OSS 120B Runtime"
+    opendatahub.io/template-name: vllm-gpt-oss-120b-runtime
+    openshift.io/display-name: "vLLM GPT-OSS 120B Runtime"
+spec:
+  annotations:
+    prometheus.io/port: "8080"
+    prometheus.io/path: "/metrics"
+    io.kubernetes.cri-o.LogSizeMax: "104857600"
+  multiModel: false
+  supportedModelFormats:
+    - autoSelect: true
+      name: vLLM
+  containers:
+    - name: kserve-container
+      image: registry.redhat.io/rhaiis/vllm-cuda-rhel9:3
+      command:
+        - python3
+        - -m
+        - vllm.entrypoints.openai.api_server
+      args:
+        - --port=8080
+        - --model=/mnt/models
+        - --dtype=auto
+        - --tensor-parallel-size=8
+        - --max-model-len=131072
+        - --gpu-memory-utilization=0.90
+        - --max-num-seqs=8
+        - --enforce-eager
+        - --enable-auto-tool-choice
+        - --tool-call-parser=openai
+        - --enable-prefix-caching
+        - --enable-prompt-tokens-details
+        - --enable-server-load-tracking
+      env:
+        - name: HOME
+          value: /tmp/home
+        - name: HF_HOME
+          value: /tmp/hf-cache
+      ports:
+        - containerPort: 8080
+          protocol: TCP
+      resources:
+        requests:
+          cpu: "16"
+          memory: 128Gi
+        limits:
+          cpu: "32"
+          memory: 256Gi
+      volumeMounts:
+        - name: shm
+          mountPath: /dev/shm
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: shm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 32Gi
+    - name: tmp
+      emptyDir: {}
+---
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: gpt-oss-120b
+  namespace: gpt-oss-120b-model
+  labels:
+    opendatahub.io/dashboard: "true"
+  annotations:
+    serving.kserve.io/deploymentMode: RawDeployment
+    serving.kserve.io/deploymentStrategy: Recreate
+    openshift.io/display-name: "GPT-OSS 120B"
+spec:
+  predictor:
+    model:
+      modelFormat:
+        name: vLLM
+      runtime: vllm-gpt-oss-120b-runtime
+      storageUri: "hf://RedHatAI/gpt-oss-120b"
+      resources:
+        requests:
+          nvidia.com/gpu: "8"
+        limits:
+          nvidia.com/gpu: "8"
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule

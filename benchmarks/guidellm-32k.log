@@ -1,0 +1,86 @@
+✔ OpenAIHTTPBackend backend validated with model gpt-oss-120b
+  {'kind': 'openai_http', 'target':                                             
+  'https://gpt-oss-120b-direct-gpt-oss-120b-model.apps.cluster-z9hbt.z9hbt.sandb
+  ox1495.opentlc.com', 'model': 'gpt-oss-120b', 'request_format':               
+  '/v1/chat/completions', 'api_key': None, 'api_routes': {'/health': 'health',  
+  '/v1/models': 'v1/models', '/v1/completions': 'v1/completions',               
+  '/v1/chat/completions': 'v1/chat/completions', '/v1/embeddings':              
+  'v1/embeddings', '/v1/responses': 'v1/responses', '/v1/audio/transcriptions': 
+  'v1/audio/transcriptions', '/v1/audio/translations': 'v1/audio/translations', 
+  '/pooling': 'pooling'}, 'timeout': None, 'timeout_connect': 5.0, 'http2':     
+  True, 'follow_redirects': True, 'verify': False, 'validate_backend': True,    
+  'stream': True, 'extras': None, 'max_tokens': None, 'server_history': False,  
+  'tool_call_missing_behavior': 'error_stop', 'multiturn_reasoning': False}     
+✔ Tokenizer resolved, Using tokenizer 'gpt2' from arguments
+  {'kind': 'huggingface_auto', 'model': 'gpt2', 'load_kwargs': {}}              
+✔ 1 datasets resolved
+  [{'kind': 'synthetic_text', 'load_kwargs': {}, 'prompt_tokens': 32000,        
+  'prompt_tokens_stdev': None, 'prompt_tokens_min': None, 'prompt_tokens_max':  
+  None, 'output_tokens': 4000, 'output_tokens_stdev': None, 'output_tokens_min':
+  None, 'output_tokens_max': None, 'delay': None, 'delay_stdev': None,          
+  'delay_min': None, 'delay_max': None, 'turns': 1, 'tool_call_turns': [],      
+  'tools': None, 'tool_response_tokens': None, 'tool_response_tokens_stdev':    
+  None, 'tool_response_tokens_min': None, 'tool_response_tokens_max': None,     
+  'server_tool_call_turns': [], 'prefix_buckets': None}]                        
+✔ 2 preprocessors resolved
+  [{'kind': 'generative_column_mapper', 'column_mappings': None}, {'kind':      
+  'encode_media', 'audio_kwargs': {}, 'image_kwargs': {}, 'video_kwargs': {}}]  
+✔ Finalizer resolved
+  {'kind': 'generative', 'tool_call_mode': 'client'}                            
+✔ Request loader resolved with inf unique requests
+  {'kind': 'pytorch', 'samples': -1, 'shuffle': False, 'num_workers': 1}        
+✔ ConcurrentProfile profile resolved
+  {'kind': 'concurrent', 'rampup_duration': 0.0, 'warmup': {'percent': None,    
+  'value': None, 'mode': 'prefer_duration'}, 'cooldown': {'percent': None,      
+  'value': None, 'mode': 'prefer_duration'}, 'streams': [2]}                    
+✔ Output formats resolved
+  [{'kind': 'json', 'path':                                                     
+  '/Users/wjackson/Developer/workshop-setup/benchmarks.json'}]                  
+✔ Setup complete, starting benchmarks...
+
+
+
+Token indices sequence length is longer than the specified maximum sequence length for this model (45773 > 1024). Running this sequence through the model will result in indexing errors
+26-08-12 23:24:21|ERROR            |guidellm.scheduler.worker_group:_process_health_monitor:296 - Worker process 59116 died unexpectedly (signal 11)
+Traceback (most recent call last):
+  File "/Users/wjackson/.pyenv/versions/3.11.12/bin/guidellm", line 6, in <module>
+    sys.exit(cli())
+             ^^^^^
+  File "/Users/wjackson/.pyenv/versions/3.11.12/lib/python3.11/site-packages/click/core.py", line 1569, in __call__
+    return self.main(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/wjackson/.pyenv/versions/3.11.12/lib/python3.11/site-packages/click/core.py", line 1490, in main
+    rv = self.invoke(ctx)
+         ^^^^^^^^^^^^^^^^
+  File "/Users/wjackson/.pyenv/versions/3.11.12/lib/python3.11/site-packages/click/core.py", line 1970, in invoke
+    return _process_result(sub_ctx.command.invoke(sub_ctx))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/wjackson/.pyenv/versions/3.11.12/lib/python3.11/site-packages/click/core.py", line 1353, in invoke
+    return ctx.invoke(self.callback, **ctx.params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/wjackson/.pyenv/versions/3.11.12/lib/python3.11/site-packages/click/core.py", line 907, in invoke
+    return callback(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/wjackson/.pyenv/versions/3.11.12/lib/python3.11/site-packages/guidellm/utils/click_pydantic.py", line 387, in wrapper
+    return func(**kw)
+           ^^^^^^^^^^
+  File "/Users/wjackson/.pyenv/versions/3.11.12/lib/python3.11/site-packages/guidellm/cli/run.py", line 149, in run
+    asyncio.run(
+  File "/Users/wjackson/.pyenv/versions/3.11.12/lib/python3.11/asyncio/runners.py", line 190, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/Users/wjackson/.pyenv/versions/3.11.12/lib/python3.11/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "uvloop/loop.pyx", line 1518, in uvloop.loop.Loop.run_until_complete
+  File "/Users/wjackson/.pyenv/versions/3.11.12/lib/python3.11/site-packages/guidellm/benchmark/entrypoints.py", line 527, in benchmark_generative_text
+    async for benchmark in benchmarker.run(
+  File "/Users/wjackson/.pyenv/versions/3.11.12/lib/python3.11/site-packages/guidellm/benchmark/benchmarker.py", line 134, in run
+    async for (
+  File "/Users/wjackson/.pyenv/versions/3.11.12/lib/python3.11/site-packages/guidellm/scheduler/scheduler.py", line 143, in run
+    raise err
+  File "/Users/wjackson/.pyenv/versions/3.11.12/lib/python3.11/site-packages/guidellm/scheduler/scheduler.py", line 126, in run
+    await worker_group.create_processes()
+  File "/Users/wjackson/.pyenv/versions/3.11.12/lib/python3.11/site-packages/guidellm/scheduler/worker_group.py", line 273, in create_processes
+    raise RuntimeError(f"Worker process group startup failed: {detail}")
+RuntimeError: Worker process group startup failed: Worker process 59116 died unexpectedly (signal 11). Check system logs for details

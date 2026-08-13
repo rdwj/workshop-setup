@@ -1,0 +1,292 @@
+# Deploys RedHatAI/gpt-oss-120b on a g6e.12xlarge (4x L40S 48GB) via KServe.
+# Tuned for 2-seat agentic code refactoring: large context, low concurrency.
+#
+# gpt-oss-120b is a Mixture of Experts model (117B total / 5.1B active) with
+# MXFP4-quantized expert weights. It fits on a single 80GB GPU, so 4x L40S
+# has ample headroom — most VRAM goes to KV cache for long contexts.
+#
+# Uses EAGLE-3 speculative decoding (0.9B draft model) for 2-3x acceptance
+# rate on code tasks. Requires vLLM >= 0.19.0 (upstream image).
+# Prefix caching is disabled — EAGLE-3 is incompatible with it.
+#
+# Deployment order:
+#   1. Apply this file (creates namespace, PVC, secrets, download Job, etc.)
+#   2. Wait for the download Job to complete (~15-20 min on first run):
+#        oc get jobs -n gpt-oss-120b-model --watch
+#   3. The InferenceService reads from the PVC — no re-download on restart.
+#
+# Two routes are exposed:
+#   - Auth route (KServe-managed): token-protected via RHOAI Authorino,
+#     but the kube-rbac-proxy sidecar has a hardcoded 30s upstream timeout.
+#     Use streaming (stream:true) on this route for long generations.
+#   - Direct route: bypasses the auth proxy, supports non-streaming with
+#     a 300s timeout. No auth — use for benchmarking (GuideLLM) or
+#     restrict access via NetworkPolicy.
+#
+# Auth route bearer token:
+#   oc get secret default-token-gpt-oss-120b-sa -n gpt-oss-120b-model \
+#     -o jsonpath='{.data.token}' | base64 -d
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gpt-oss-120b-model
+  labels:
+    opendatahub.io/dashboard: "true"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gpt-oss-120b-model-cache
+  namespace: gpt-oss-120b-model
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 200Gi
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hf-token
+  namespace: gpt-oss-120b-model
+type: Opaque
+stringData:
+  token: "REPLACE_WITH_HF_TOKEN"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gpt-oss-120b-sa
+  namespace: gpt-oss-120b-model
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: default-token-gpt-oss-120b-sa
+  namespace: gpt-oss-120b-model
+  labels:
+    opendatahub.io/dashboard: "true"
+  annotations:
+    kubernetes.io/service-account.name: gpt-oss-120b-sa
+    openshift.io/display-name: default-token
+type: kubernetes.io/service-account-token
+---
+# One-time Job to download the model from HuggingFace onto the PVC.
+# Runs once and succeeds; re-applying the manifest is a no-op (Job is
+# immutable). Delete the Job to force a re-download.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: download-gpt-oss-120b
+  namespace: gpt-oss-120b-model
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: OnFailure
+      nodeSelector:
+        node.kubernetes.io/instance-type: g6e.12xlarge
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: download
+          image: registry.redhat.io/ubi9/python-311:latest
+          command:
+            - bash
+            - -c
+            - |
+              pip install -q huggingface_hub &&
+              huggingface-cli download RedHatAI/gpt-oss-120b-essential \
+                --local-dir /models/gpt-oss-120b-essential \
+                --local-dir-use-symlinks=False
+          env:
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token
+                  key: token
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: gpt-oss-120b-model-cache
+---
+apiVersion: serving.kserve.io/v1alpha1
+kind: ServingRuntime
+metadata:
+  name: vllm-gpt-oss-120b-g6e-runtime
+  namespace: gpt-oss-120b-model
+  labels:
+    opendatahub.io/dashboard: "true"
+  annotations:
+    opendatahub.io/apiProtocol: REST
+    opendatahub.io/template-display-name: "vLLM GPT-OSS 120B Runtime (g6e.12xlarge)"
+    opendatahub.io/template-name: vllm-gpt-oss-120b-g6e-runtime
+    openshift.io/display-name: "vLLM GPT-OSS 120B Runtime (g6e.12xlarge)"
+spec:
+  annotations:
+    prometheus.io/port: "8080"
+    prometheus.io/path: "/metrics"
+    io.kubernetes.cri-o.LogSizeMax: "104857600"
+  multiModel: false
+  supportedModelFormats:
+    - autoSelect: true
+      name: vLLM
+  containers:
+    - name: kserve-container
+      image: vllm/vllm-openai:latest
+      command:
+        - python3
+        - -m
+        - vllm.entrypoints.openai.api_server
+      args:
+        - --port=8080
+        - --model=/mnt/models
+        - --dtype=auto
+        - --tensor-parallel-size=4
+        - --max-model-len=131072
+        - --kv-cache-dtype=fp8_e4m3
+        - --gpu-memory-utilization=0.95
+        - --max-num-seqs=4
+        - --enforce-eager
+        - --enable-auto-tool-choice
+        - --tool-call-parser=openai
+        - --no-enable-prefix-caching
+        - --enable-prompt-tokens-details
+        - --enable-server-load-tracking
+        - --speculative-config={"model":"RedHatAI/gpt-oss-120b-speculator.eagle3","num_speculative_tokens":5,"method":"eagle3"}
+      env:
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: token
+        - name: HOME
+          value: /tmp/home
+        - name: HF_HOME
+          value: /tmp/hf-cache
+      ports:
+        - containerPort: 8080
+          protocol: TCP
+      resources:
+        requests:
+          cpu: "12"
+          memory: 96Gi
+        limits:
+          cpu: "24"
+          memory: 160Gi
+      volumeMounts:
+        - name: shm
+          mountPath: /dev/shm
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: shm
+      emptyDir:
+        medium: Memory
+        sizeLimit: 16Gi
+    - name: tmp
+      emptyDir: {}
+---
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: gpt-oss-120b
+  namespace: gpt-oss-120b-model
+  labels:
+    networking.kserve.io/visibility: exposed
+    opendatahub.io/dashboard: "true"
+  annotations:
+    serving.kserve.io/deploymentMode: RawDeployment
+    serving.kserve.io/deploymentStrategy: Recreate
+    security.opendatahub.io/enable-auth: "true"
+    haproxy.router.openshift.io/timeout: "300s"
+    openshift.io/display-name: "GPT-OSS 120B (g6e)"
+spec:
+  predictor:
+    model:
+      modelFormat:
+        name: vLLM
+      runtime: vllm-gpt-oss-120b-g6e-runtime
+      storageUri: "pvc://gpt-oss-120b-model-cache/gpt-oss-120b-essential"
+      resources:
+        requests:
+          nvidia.com/gpu: "4"
+        limits:
+          nvidia.com/gpu: "4"
+    nodeSelector:
+      node.kubernetes.io/instance-type: g6e.12xlarge
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+---
+# Direct-access Service and Route bypassing the kube-rbac-proxy sidecar.
+# The RHOAI auth proxy has a hardcoded 30s upstream timeout that cannot be
+# configured via annotations or ConfigMap. This route goes straight to vLLM
+# on port 8080, supporting non-streaming responses with a 300s timeout.
+# No auth — use for benchmarking (GuideLLM) or restrict via NetworkPolicy.
+apiVersion: v1
+kind: Service
+metadata:
+  name: gpt-oss-120b-direct
+  namespace: gpt-oss-120b-model
+spec:
+  selector:
+    serving.kserve.io/inferenceservice: gpt-oss-120b
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: gpt-oss-120b-direct
+  namespace: gpt-oss-120b-model
+  annotations:
+    haproxy.router.openshift.io/timeout: "300s"
+spec:
+  to:
+    kind: Service
+    name: gpt-oss-120b-direct
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gpt-oss-120b-inference-access
+rules:
+  - apiGroups: ["serving.kserve.io"]
+    resources: ["inferenceservices"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gpt-oss-120b-inference-access
+subjects:
+  - kind: ServiceAccount
+    name: gpt-oss-120b-sa
+    namespace: gpt-oss-120b-model
+roleRef:
+  kind: ClusterRole
+  name: gpt-oss-120b-inference-access
+  apiGroup: rbac.authorization.k8s.io

@@ -1,0 +1,51 @@
+=== BENCHMARK 1: 126K CONTEXT TEST ===
+Configuration:
+- Prompt tokens: 126,000
+- Output tokens: 4,000
+- Total tokens per request: 130,001
+- Concurrent streams: 2
+- Duration: 600 seconds (10 minutes)
+- Request format: /v1/completions
+- Model: RedHatAI/gpt-oss-120b-essential
+
+STATUS: SUCCESS - All requests completed successfully
+
+REQUEST METRICS:
+- Completed Requests: 3 (1 request per ~200 seconds)
+- Failed Requests: 0
+- Total Input Tokens: 378,003
+- Total Output Tokens: 12,000
+
+LATENCY STATISTICS (Completed Requests):
+- Request Latency (median): 366.3 seconds
+- Request Latency (p95): 393.2 seconds
+- TTFT (median): 29,299.5 ms (29.3 seconds)
+- TTFT (p95): 55,304.0 ms (55.3 seconds)
+- TTFOT (median): 29,299.5 ms
+- ITL (median): 84.3 ms
+- TPOT (median): 91.6 ms
+
+THROUGHPUT STATISTICS:
+- Requests per second: 0.0 (median concurrency 2.0)
+- Input tokens per second: 1,273.3
+- Output tokens per second: 22.6
+- Total tokens per second: 740.6
+
+TOKEN STATISTICS (Per Request):
+- Input tokens (median): 126,001
+- Output tokens (median): 4,000
+- Total tokens (median): 130,001
+- Stream iterations (median): 3,724 (streaming chunks)
+
+TEXT METRICS:
+- Input words per request: 105,833
+- Output words per request: 2,342
+- Input characters per request: 711,014
+- Output characters per request: 16,686
+
+KEY FINDINGS:
+- Successfully handled 126K context with 4K output tokens
+- Average response time: ~6 minutes per request
+- TTFT (Time to First Token) averaged 29-55 seconds
+- Token generation rate of 22.6 tokens/second
+- Model remained stable during the 10-minute benchmark run
