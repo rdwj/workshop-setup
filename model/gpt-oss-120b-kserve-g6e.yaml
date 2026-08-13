@@ -97,12 +97,11 @@ spec:
           image: registry.redhat.io/ubi9/python-311:latest
           command:
             - bash
-            - -c
+            - -exc
             - |
               pip install -q huggingface_hub &&
-              huggingface-cli download RedHatAI/gpt-oss-120b-essential \
-                --local-dir /models/gpt-oss-120b-essential \
-                --local-dir-use-symlinks=False
+              hf download RedHatAI/gpt-oss-120b-essential \
+                --local-dir /models/gpt-oss-120b-essential
           env:
             - name: HF_TOKEN
               valueFrom:
