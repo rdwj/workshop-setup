@@ -25,6 +25,11 @@ rhoai_versions:
     channel: "stable-3.4"
     starting_csv: "rhods-operator.3.4.0"
     authorino_channel: "stable"
+  "3.5":
+    csv_name: "rhods-operator.3.5.0"
+    channel: "stable-3.5"
+    starting_csv: "rhods-operator.3.5.0"
+    authorino_channel: "stable"
 
 # Derived RHOAI variables — do not set these directly.
 rhoai_csv_name: "{{ rhoai_versions[rhoai_version].csv_name }}"

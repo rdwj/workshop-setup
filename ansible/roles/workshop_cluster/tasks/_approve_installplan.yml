@@ -13,6 +13,14 @@
          | selectattr('status.installedCSV', 'defined')
          | list | length > 0 }}
 
+- name: "Get expected startingCSVs for {{ ns }}"
+  ansible.builtin.set_fact:
+    expected_csvs: >-
+      {{ sub_precheck.resources
+         | map(attribute='spec.startingCSV', default='')
+         | select('ne', '')
+         | list }}
+
 - name: "Wait for InstallPlan in {{ ns }}"
   kubernetes.core.k8s_info:
     api_version: operators.coreos.com/v1alpha1
@@ -27,13 +35,24 @@
 
 - name: "Identify unapproved InstallPlan in {{ ns }}"
   ansible.builtin.set_fact:
-    unapproved_plan: >-
-      {{
-        installplan_result.resources
-        | selectattr('spec.approved', 'equalto', false)
-        | map(attribute='metadata.name')
-        | first
-      }}
+    unapproved_plan: "{{ _plan_name | trim }}"
+  vars:
+    _unapproved: >-
+      {{ installplan_result.resources
+         | selectattr('spec.approved', 'equalto', false)
+         | list }}
+    _plan_name: >-
+      {% if expected_csvs | length == 0 %}
+      {{ _unapproved | map(attribute='metadata.name') | first | default('') }}
+      {% else %}
+      {% set ns_plan = [] %}
+      {% for plan in _unapproved %}
+      {% if plan.spec.clusterServiceVersionNames | default([]) | intersect(expected_csvs) | length > 0 %}
+      {% if ns_plan.append(plan.metadata.name) %}{% endif %}
+      {% endif %}
+      {% endfor %}
+      {{ ns_plan | first | default('') }}
+      {% endif %}
   when: not csv_already_succeeded | bool
 
 - name: "Approve InstallPlan {{ unapproved_plan | default('N/A') }} in {{ ns }}"
@@ -46,7 +65,20 @@
       spec:
         approved: true
     merge_type: merge
-  when: not csv_already_succeeded | bool
+  when:
+    - not csv_already_succeeded | bool
+    - unapproved_plan | default('') | trim | length > 0
+
+- name: "WARN — no install plan matched expected CSV in {{ ns }}"
+  ansible.builtin.fail:
+    msg: >-
+      No unapproved install plan targets expected CSVs {{ expected_csvs }}.
+      This usually means OLM created a plan for a newer version.
+      Check install plans manually: oc get installplan -n {{ ns }}
+  when:
+    - not csv_already_succeeded | bool
+    - expected_csvs | length > 0
+    - unapproved_plan | default('') | trim | length == 0
 
 - name: "Operator in {{ ns }} already installed, skipping install plan approval"
   ansible.builtin.debug:

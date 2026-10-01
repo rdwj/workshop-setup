@@ -2,6 +2,7 @@
 clusters/
 cluster_creds
 ansible/inventory/clusters.yml
+ansible/inventory/users.txt
 ansible/inventory/kagenti-rhoai.yml
 ansible/inventory/fips-rhoai.yml
 ansible/inventory/mcp-rhoai.yml

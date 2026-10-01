@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate Ansible inventory from RHPDS cluster list export.
 
-Reads clusters/cluster_list.txt (copied from the RHPDS Users page) and
+Reads ansible/inventory/users.txt (copied from the RHPDS Users page) and
 writes ansible/inventory/clusters.yml with one host entry per cluster,
 using the long-lived service account token for authentication.
 
@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CLUSTER_LIST = REPO_ROOT / "clusters" / "cluster_list.txt"
+CLUSTER_LIST = REPO_ROOT / "ansible" / "inventory" / "users.txt"
 INVENTORY_OUT = REPO_ROOT / "ansible" / "inventory" / "clusters.yml"
 
 
@@ -23,9 +23,13 @@ def parse_clusters(content: str) -> list[dict]:
     blocks = content.split("sandboxes-gpte.sandbox-ocp.prod")
     for block in blocks:
         api_match = re.search(r"openshift_api_url:\s*(https://[^\s]+)", block)
+
         token_match = re.search(
             r"openshift_cluster_admin_token:\s*>-\s*\n\s*(\S+)", block
+        ) or re.search(
+            r"openshift_cluster_admin_token:\s*(eyJ\S+)", block
         )
+
         guid_match = re.search(r"guid:\s*(\S+)", block)
         if api_match and token_match and guid_match:
             clusters.append(
